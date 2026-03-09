@@ -555,41 +555,56 @@ def convert_xlsx(file_path):
     workbook = openpyxl.load_workbook(file_path, data_only=True)
     content = ""
 
+    def _build_merge_map(worksheet):
+        """构建合并单元格映射：(row, col) → 左上角单元格的值"""
+        merge_map = {}
+        for merge_range in worksheet.merged_cells.ranges:
+            top_left_value = worksheet.cell(merge_range.min_row, merge_range.min_col).value
+            for row in range(merge_range.min_row, merge_range.max_row + 1):
+                for col in range(merge_range.min_col, merge_range.max_col + 1):
+                    if row == merge_range.min_row and col == merge_range.min_col:
+                        continue  # 左上角本身不需要映射
+                    merge_map[(row, col)] = top_left_value
+        return merge_map
+
     for sheet_name in workbook.sheetnames:
         if len(workbook.sheetnames) > 1:
             content += f"## {sheet_name}\n\n"
 
         worksheet = workbook[sheet_name]
-        rows = list(worksheet.iter_rows(values_only=True))
+        merge_map = _build_merge_map(worksheet)
+        rows = list(worksheet.iter_rows(values_only=False))
 
         if rows:
-            # 过滤空行
+            # 过滤空行（合并单元格的值也要参与判断）
             non_empty_rows = []
             for row in rows:
-                if any(cell is not None and str(cell).strip() for cell in row):
-                    non_empty_rows.append(row)
+                values = []
+                for cell in row:
+                    val = cell.value
+                    if val is None:
+                        val = merge_map.get((cell.row, cell.column))
+                    values.append(val)
+                if any(v is not None and str(v).strip() for v in values):
+                    non_empty_rows.append((row, values))
 
             if non_empty_rows:
-                def last_non_empty_col_count(row):
-                    for idx in range(len(row) - 1, -1, -1):
-                        cell = row[idx]
-                        if cell is None:
-                            continue
-                        if str(cell).strip():
+                def last_non_empty_col_count(values):
+                    for idx in range(len(values) - 1, -1, -1):
+                        if values[idx] is not None and str(values[idx]).strip():
                             return idx + 1
                     return 0
 
-                max_cols = max(last_non_empty_col_count(row) for row in non_empty_rows)
+                max_cols = max(last_non_empty_col_count(v) for _, v in non_empty_rows)
 
                 if max_cols == 0:
-                    # 如果没有非空单元格，跳过这个工作表
                     continue
 
-                for i, row in enumerate(non_empty_rows):
+                for i, (row, values) in enumerate(non_empty_rows):
                     row_data = []
                     for j in range(max_cols):
-                        if j < len(row) and row[j] is not None:
-                            row_data.append(_normalize_table_cell(row[j]))
+                        if j < len(values) and values[j] is not None:
+                            row_data.append(_normalize_table_cell(values[j]))
                         else:
                             row_data.append("")
 
@@ -630,10 +645,32 @@ def convert_pptx(file_path):
             if not para.text.strip():
                 continue
 
-            # 拼接带格式的文本
-            formatted = ""
+            # 将相邻同格式的 run 合并后再添加 Markdown 标记，避免 **text1****text2** 碎片
+            groups = []
             for run in para.runs:
-                formatted += _format_run(run)
+                text = run.text
+                if not text:
+                    continue
+                fmt = (bool(run.font.bold), bool(run.font.italic))
+                if groups and groups[-1][0] == fmt:
+                    groups[-1] = (fmt, groups[-1][1] + text)
+                else:
+                    groups.append((fmt, text))
+            formatted = ""
+            for (bold, italic), text in groups:
+                if bold or italic:
+                    stripped = text.strip()
+                    if not stripped:
+                        formatted += text
+                        continue
+                    if bold and italic:
+                        formatted += f"***{stripped}***"
+                    elif bold:
+                        formatted += f"**{stripped}**"
+                    else:
+                        formatted += f"*{stripped}*"
+                else:
+                    formatted += text
             text_value = formatted.strip() or para.text.strip()
 
             if is_title:
@@ -665,13 +702,29 @@ def convert_pptx(file_path):
             # 处理表格
             if shape.has_table:
                 table = shape.table
+                col_count = len(table.columns)
+                all_rows_data = []
                 for row_idx, row in enumerate(table.rows):
-                    row_data = [_normalize_table_cell(cell.text) for cell in row.cells]
-                    if row_idx == 0:
-                        content += "| " + " | ".join(row_data) + " |\n"
-                        content += "| " + " | ".join(["---"] * len(row_data)) + " |\n"
-                    else:
-                        content += "| " + " | ".join(row_data) + " |\n"
+                    row_data = []
+                    for col_idx, cell in enumerate(row.cells):
+                        # 去重合并单元格：跳过非左上角的水平合并续格
+                        if hasattr(cell, 'is_merge_origin'):
+                            if cell.is_merge_origin:
+                                row_data.append(_normalize_table_cell(cell.text))
+                            elif col_idx > 0 and row.cells[col_idx - 1] is cell:
+                                # 水平续格（同一对象引用），跳过
+                                continue
+                            else:
+                                row_data.append(_normalize_table_cell(cell.text))
+                        else:
+                            row_data.append(_normalize_table_cell(cell.text))
+                    all_rows_data.append(row_data)
+                max_cols = max((len(r) for r in all_rows_data), default=0)
+                for idx, row_data in enumerate(all_rows_data):
+                    padded = row_data + [""] * (max_cols - len(row_data))
+                    content += "| " + " | ".join(padded) + " |\n"
+                    if idx == 0:
+                        content += "| " + " | ".join(["---"] * max_cols) + " |\n"
                 content += "\n"
                 continue
 
@@ -697,40 +750,49 @@ def convert_pptx(file_path):
 
     return content.strip()
 
+def _render_pdf_table(table_obj):
+    """将 pdfplumber 表格对象渲染为 Markdown 表格字符串"""
+    table = table_obj.extract()
+    if not table or len(table) == 0:
+        return ""
+    filtered_table = []
+    for row in table:
+        if row and any(cell is not None and str(cell).strip() for cell in row):
+            cleaned_row = [_normalize_table_cell(cell) for cell in row]
+            filtered_table.append(cleaned_row)
+    if not filtered_table:
+        return ""
+    max_cols = max(len(r) for r in filtered_table)
+    normalized = [r + [""] * (max_cols - len(r)) for r in filtered_table]
+    result = ""
+    for idx, row in enumerate(normalized):
+        result += "| " + " | ".join(row) + " |\n"
+        if idx == 0:
+            result += "| " + " | ".join(["---"] * len(row)) + " |\n"
+    result += "\n"
+    return result
+
 def convert_pdf(file_path):
-    """转换 PDF 文件，支持文本和表格提取"""
+    """转换 PDF 文件，支持文本和表格提取，按页面位置交错输出"""
     import pdfplumber
 
     content = ""
     with pdfplumber.open(file_path) as pdf:
         for page in pdf.pages:
-            # 提取表格及其边界框
             tables = page.find_tables()
             table_bboxes = [t.bbox for t in tables] if tables else []
 
-            if tables:
-                for table_obj in tables:
-                    table = table_obj.extract()
-                    if table and len(table) > 0:
-                        # 过滤空行和空单元格
-                        filtered_table = []
-                        for row in table:
-                            if row and any(cell is not None and str(cell).strip() for cell in row):
-                                cleaned_row = [_normalize_table_cell(cell) for cell in row]
-                                filtered_table.append(cleaned_row)
+            # 收集所有内容块及其垂直位置，统一排序输出
+            blocks = []  # (top_position, content_string)
 
-                        if filtered_table:
-                            max_cols = max(len(r) for r in filtered_table)
-                            normalized = [r + [""] * (max_cols - len(r)) for r in filtered_table]
-                            for idx, row in enumerate(normalized):
-                                content += "| " + " | ".join(row) + " |\n"
-                                if idx == 0:
-                                    content += "| " + " | ".join(["---"] * len(row)) + " |\n"
-                            content += "\n"
+            # 1. 收集表格块
+            for table_obj in tables:
+                md = _render_pdf_table(table_obj)
+                if md:
+                    blocks.append((table_obj.bbox[1], md))
 
-            # 提取文本，排除表格区域避免内容重复
+            # 2. 提取非表格区域的文本
             if table_bboxes:
-                # 过滤掉落在表格边界框内的字符
                 filtered_page = page
                 for bbox in table_bboxes:
                     filtered_page = filtered_page.filter(
@@ -741,20 +803,41 @@ def convert_pdf(file_path):
                             obj.get("x1", 0) <= b[2]
                         )
                     )
-                text = filtered_page.extract_text()
+                # 按表格边界将文本分段，保留各段的垂直位置
+                text_chars = filtered_page.chars
+                if text_chars:
+                    # 用表格的 top 坐标作为分割点，将文本切分为多个区域
+                    split_tops = sorted(set([0.0] + [b[1] for b in table_bboxes] + [b[3] for b in table_bboxes]))
+                    for seg_idx in range(len(split_tops)):
+                        seg_top = split_tops[seg_idx]
+                        seg_bottom = split_tops[seg_idx + 1] if seg_idx + 1 < len(split_tops) else float('inf')
+                        seg_page = filtered_page.filter(
+                            lambda obj, t=seg_top, b=seg_bottom: (
+                                obj.get("top", 0) >= t and obj.get("top", 0) < b
+                            )
+                        )
+                        seg_text = seg_page.extract_text()
+                        if seg_text and seg_text.strip():
+                            lines = [l.strip() for l in seg_text.split('\n') if l.strip()]
+                            if lines:
+                                blocks.append((seg_top, '\n'.join(lines) + "\n\n"))
+                else:
+                    text = filtered_page.extract_text()
+                    if text and text.strip():
+                        lines = [l.strip() for l in text.split('\n') if l.strip()]
+                        if lines:
+                            blocks.append((0.0, '\n'.join(lines) + "\n\n"))
             else:
                 text = page.extract_text()
+                if text and text.strip():
+                    lines = [l.strip() for l in text.split('\n') if l.strip()]
+                    if lines:
+                        blocks.append((0.0, '\n'.join(lines) + "\n\n"))
 
-            if text and text.strip():
-                lines = text.split('\n')
-                cleaned_lines = []
-                for line in lines:
-                    line = line.strip()
-                    if line:
-                        cleaned_lines.append(line)
-
-                if cleaned_lines:
-                    content += '\n'.join(cleaned_lines) + "\n\n"
+            # 3. 按垂直位置排序后输出
+            blocks.sort(key=lambda b: b[0])
+            for _, block_content in blocks:
+                content += block_content
 
     return content.strip()
 
