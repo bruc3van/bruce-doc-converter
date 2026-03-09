@@ -21,12 +21,12 @@ import re
 import subprocess
 import shutil
 import io
-from pathlib import Path
 
 SUPPORTED_EXTENSIONS = ['.docx', '.xlsx', '.pptx', '.pdf', '.md']
 MAX_FILE_SIZE_BYTES = 100 * 1024 * 1024
 NODE_CONVERT_TIMEOUT_SECONDS = 120
 NODE_SHARED_HOME_ENV = "DOCUGENIUS_NODE_HOME"
+GENERATED_OUTPUT_DIR_NAMES = {"Markdown", "Word"}
 
 def _configure_windows_stdio():
     """
@@ -322,14 +322,109 @@ def check_dependencies(file_ext=None, auto_install=True):
 
     return True, None
 
-def _normalize_table_cell(value):
-    """将单元格内容规范化为安全的 Markdown 表格单元格文本"""
+def _normalize_text(value, preserve_newlines=False):
+    """规范化提取出来的文本，减少空白和换行噪声"""
     if value is None:
         return ""
-    text = str(value)
-    text = text.replace("\r\n", "\n").replace("\r", "\n")
-    text = text.replace("\n", " ")
-    text = text.strip()
+
+    text = str(value).replace("\r\n", "\n").replace("\r", "\n")
+    if preserve_newlines:
+        lines = [re.sub(r"\s+", " ", line).strip() for line in text.split("\n")]
+        text = "\n".join(line for line in lines if line)
+        return re.sub(r"\n{3,}", "\n\n", text).strip()
+
+    text = re.sub(r"\s+", " ", text.replace("\n", " "))
+    return text.strip()
+
+def _escape_plain_markdown_text(text):
+    """避免普通文本误触发 Markdown 标题、列表、引用等语法"""
+    if not text:
+        return ""
+
+    escaped = text
+    escaped = re.sub(r"^([>#\-\+\*])", r"\\\1", escaped)
+    escaped = re.sub(r"^(\d+)\.\s", r"\\\1. ", escaped)
+    return escaped
+
+def _format_inline_markdown(text, *, bold=False, italic=False):
+    """保留两侧空白后再包裹 Markdown 强调标记，避免单词粘连"""
+    if not text:
+        return ""
+
+    if not (bold or italic):
+        return text
+
+    match = re.match(r"^(\s*)(.*?)(\s*)$", text, re.DOTALL)
+    if not match:
+        return text
+
+    leading, core, trailing = match.groups()
+    if not core:
+        return text
+
+    if bold and italic:
+        wrapped = f"***{core}***"
+    elif bold:
+        wrapped = f"**{core}**"
+    else:
+        wrapped = f"*{core}*"
+    return f"{leading}{wrapped}{trailing}"
+
+def _validate_input_file(file_path):
+    """校验并规范化输入文件路径"""
+    if file_path is None:
+        return None, "文件路径不能为空"
+
+    normalized = os.path.abspath(os.path.normpath(os.path.expanduser(str(file_path))))
+    if not os.path.exists(normalized):
+        return None, f'文件不存在: {normalized}'
+    if not os.path.isfile(normalized):
+        return None, f'输入路径不是文件: {normalized}'
+    return normalized, None
+
+def _resolve_markdown_output_path(file_path, output_dir=None):
+    """生成 Markdown 输出路径，并确保输出目录可用"""
+    if output_dir:
+        target_dir = os.path.abspath(os.path.normpath(os.path.expanduser(str(output_dir))))
+    else:
+        file_dir = os.path.dirname(file_path) or '.'
+        target_dir = os.path.join(file_dir, 'Markdown')
+
+    if os.path.exists(target_dir) and not os.path.isdir(target_dir):
+        raise NotADirectoryError(f'输出路径不是目录: {target_dir}')
+
+    os.makedirs(target_dir, exist_ok=True)
+    output_filename = os.path.splitext(os.path.basename(file_path))[0] + '.md'
+    return os.path.join(target_dir, output_filename)
+
+def _iter_batch_input_files(directory, recursive=True, output_dir=None):
+    """遍历批量转换输入文件，跳过已生成输出目录，避免重复处理"""
+    normalized_directory = os.path.abspath(os.path.normpath(os.path.expanduser(str(directory))))
+    custom_output_dir = None
+    if output_dir:
+        custom_output_dir = os.path.abspath(os.path.normpath(os.path.expanduser(str(output_dir))))
+
+    def _should_skip_dir(dir_path):
+        if custom_output_dir and os.path.normcase(dir_path) == os.path.normcase(custom_output_dir):
+            return True
+        return os.path.basename(dir_path) in GENERATED_OUTPUT_DIR_NAMES
+
+    if recursive:
+        for root, dirs, files in os.walk(normalized_directory):
+            dirs[:] = [dir_name for dir_name in dirs if not _should_skip_dir(os.path.join(root, dir_name))]
+            for file in files:
+                if os.path.splitext(file)[1].lower() in SUPPORTED_EXTENSIONS:
+                    yield os.path.join(root, file)
+        return
+
+    for file in os.listdir(normalized_directory):
+        file_path = os.path.join(normalized_directory, file)
+        if os.path.isfile(file_path) and os.path.splitext(file)[1].lower() in SUPPORTED_EXTENSIONS:
+            yield file_path
+
+def _normalize_table_cell(value):
+    """将单元格内容规范化为安全的 Markdown 表格单元格文本"""
+    text = _normalize_text(value)
     # Markdown 表格分隔符转义
     text = text.replace("|", "\\|")
     return text
@@ -411,22 +506,6 @@ def convert_docx(file_path):
         except Exception:
             return None
 
-    def format_run_text(run):
-        """格式化单个文本片段，添加Markdown格式标记"""
-        text = run.text
-        if not text:
-            return ""
-
-        # 应用粗体和斜体格式
-        if run.bold and run.italic:
-            text = f"***{text}***"
-        elif run.bold:
-            text = f"**{text}**"
-        elif run.italic:
-            text = f"*{text}*"
-
-        return text
-
     def process_paragraph(para):
         """处理单个段落，识别标题、列表和格式"""
         if not para.text.strip():
@@ -450,21 +529,8 @@ def convert_docx(file_path):
                 groups.append((fmt, text))
         formatted_text = ""
         for (bold, italic), text in groups:
-            if bold or italic:
-                stripped = text.strip()
-                if not stripped:
-                    # 纯空白的格式组，作为普通空白输出
-                    formatted_text += text
-                    continue
-                if bold and italic:
-                    formatted_text += f"***{stripped}***"
-                elif bold:
-                    formatted_text += f"**{stripped}**"
-                else:
-                    formatted_text += f"*{stripped}*"
-            else:
-                formatted_text += text
-        text_value = (formatted_text.strip() or para.text.strip()).replace("\n", " ").strip()
+            formatted_text += _format_inline_markdown(text, bold=bold, italic=italic)
+        text_value = _normalize_text(formatted_text.strip() or para.text.strip())
         if not text_value:
             return ""
 
@@ -508,7 +574,7 @@ def convert_docx(file_path):
             if "Number" in style_id_str or "Number" in style_name_str or style_name_str == "List Number":
                 return f"{indent}1. {text_value}\n"
 
-        return text_value + "\n\n"
+        return _escape_plain_markdown_text(text_value) + "\n\n"
 
     # 处理文档中的所有元素（段落和表格）
     # 需要按照它们在文档中的顺序处理
@@ -539,6 +605,8 @@ def convert_docx(file_path):
                     all_rows_data.append([_normalize_table_cell(cell.text) for cell in unique_cells])
 
                 max_cols = max((len(r) for r in all_rows_data), default=0)
+                if max_cols == 0:
+                    continue
                 for i, row_data in enumerate(all_rows_data):
                     padded = row_data + [""] * (max_cols - len(row_data))
                     content += "| " + " | ".join(padded) + " |\n"
@@ -567,76 +635,66 @@ def convert_xlsx(file_path):
                     merge_map[(row, col)] = top_left_value
         return merge_map
 
-    for sheet_name in workbook.sheetnames:
-        if len(workbook.sheetnames) > 1:
-            content += f"## {sheet_name}\n\n"
+    try:
+        for sheet_name in workbook.sheetnames:
+            if len(workbook.sheetnames) > 1:
+                content += f"## {_normalize_text(sheet_name)}\n\n"
 
-        worksheet = workbook[sheet_name]
-        merge_map = _build_merge_map(worksheet)
-        rows = list(worksheet.iter_rows(values_only=False))
+            worksheet = workbook[sheet_name]
+            merge_map = _build_merge_map(worksheet)
+            rows = list(worksheet.iter_rows(values_only=False))
 
-        if rows:
-            # 过滤空行（合并单元格的值也要参与判断）
-            non_empty_rows = []
-            for row in rows:
-                values = []
-                for cell in row:
-                    val = cell.value
-                    if val is None:
-                        val = merge_map.get((cell.row, cell.column))
-                    values.append(val)
-                if any(v is not None and str(v).strip() for v in values):
-                    non_empty_rows.append((row, values))
+            if rows:
+                # 过滤空行（合并单元格的值也要参与判断）
+                non_empty_rows = []
+                for row in rows:
+                    values = []
+                    for cell in row:
+                        val = cell.value
+                        if val is None:
+                            val = merge_map.get((cell.row, cell.column))
+                        values.append(val)
+                    if any(v is not None and str(v).strip() for v in values):
+                        non_empty_rows.append((row, values))
 
-            if non_empty_rows:
-                def last_non_empty_col_count(values):
-                    for idx in range(len(values) - 1, -1, -1):
-                        if values[idx] is not None and str(values[idx]).strip():
-                            return idx + 1
-                    return 0
+                if non_empty_rows:
+                    def last_non_empty_col_count(values):
+                        for idx in range(len(values) - 1, -1, -1):
+                            if values[idx] is not None and str(values[idx]).strip():
+                                return idx + 1
+                        return 0
 
-                max_cols = max(last_non_empty_col_count(v) for _, v in non_empty_rows)
+                    max_cols = max(last_non_empty_col_count(v) for _, v in non_empty_rows)
 
-                if max_cols == 0:
-                    continue
+                    if max_cols == 0:
+                        continue
 
-                for i, (row, values) in enumerate(non_empty_rows):
-                    row_data = []
-                    for j in range(max_cols):
-                        if j < len(values) and values[j] is not None:
-                            row_data.append(_normalize_table_cell(values[j]))
+                    for i, (_, values) in enumerate(non_empty_rows):
+                        row_data = []
+                        for j in range(max_cols):
+                            if j < len(values) and values[j] is not None:
+                                row_data.append(_normalize_table_cell(values[j]))
+                            else:
+                                row_data.append("")
+
+                        if i == 0:  # 表头
+                            content += "| " + " | ".join(row_data) + " |\n"
+                            content += "| " + " | ".join(["---"] * len(row_data)) + " |\n"
                         else:
-                            row_data.append("")
-
-                    if i == 0:  # 表头
-                        content += "| " + " | ".join(row_data) + " |\n"
-                        content += "| " + " | ".join(["---"] * len(row_data)) + " |\n"
-                    else:
-                        content += "| " + " | ".join(row_data) + " |\n"
-                content += "\n"
+                            content += "| " + " | ".join(row_data) + " |\n"
+                    content += "\n"
+    finally:
+        workbook.close()
 
     return content.strip()
 
 def convert_pptx(file_path):
     """转换 PowerPoint 文件，提取标题、列表、格式、表格和备注"""
     import pptx
-    from pptx.util import Pt
+    from pptx.enum.shapes import MSO_SHAPE_TYPE
 
     presentation = pptx.Presentation(file_path)
     content = ""
-
-    def _format_run(run):
-        """格式化单个文本片段"""
-        text = run.text
-        if not text:
-            return ""
-        if run.font.bold and run.font.italic:
-            text = f"***{text}***"
-        elif run.font.bold:
-            text = f"**{text}**"
-        elif run.font.italic:
-            text = f"*{text}*"
-        return text
 
     def _process_text_frame(text_frame, is_title=False):
         """处理文本框，保留段落层级和格式"""
@@ -658,20 +716,8 @@ def convert_pptx(file_path):
                     groups.append((fmt, text))
             formatted = ""
             for (bold, italic), text in groups:
-                if bold or italic:
-                    stripped = text.strip()
-                    if not stripped:
-                        formatted += text
-                        continue
-                    if bold and italic:
-                        formatted += f"***{stripped}***"
-                    elif bold:
-                        formatted += f"**{stripped}**"
-                    else:
-                        formatted += f"*{stripped}*"
-                else:
-                    formatted += text
-            text_value = formatted.strip() or para.text.strip()
+                formatted += _format_inline_markdown(text, bold=bold, italic=italic)
+            text_value = _normalize_text(formatted.strip() or para.text.strip())
 
             if is_title:
                 result += f"### {text_value}\n\n"
@@ -689,37 +735,55 @@ def convert_pptx(file_path):
                 './/{http://schemas.openxmlformats.org/drawingml/2006/main}buAutoNum') is not None:
                 result += f"1. {text_value}\n"
             else:
-                result += text_value + "\n\n"
+                result += _escape_plain_markdown_text(text_value) + "\n\n"
 
         return result
+
+    def _iter_shapes(shapes):
+        for shape in shapes:
+            yield shape
+            if getattr(shape, "shape_type", None) == MSO_SHAPE_TYPE.GROUP:
+                yield from _iter_shapes(shape.shapes)
+
+    def _shape_is_title(shape):
+        if not getattr(shape, "is_placeholder", False):
+            return False
+
+        try:
+            return shape.placeholder_format.idx in (0, 1)
+        except Exception:
+            return False
 
     for i, slide in enumerate(presentation.slides, 1):
         if len(presentation.slides) > 1:
             content += f"## Slide {i}\n\n"
 
         # 按占位符类型分类处理
-        for shape in slide.shapes:
+        for shape in _iter_shapes(slide.shapes):
             # 处理表格
             if shape.has_table:
                 table = shape.table
-                col_count = len(table.columns)
                 all_rows_data = []
-                for row_idx, row in enumerate(table.rows):
+                for row in table.rows:
                     row_data = []
-                    for col_idx, cell in enumerate(row.cells):
+                    seen_cells = set()
+                    for cell in row.cells:
+                        cell_id = id(cell)
+                        if cell_id in seen_cells:
+                            continue
+                        seen_cells.add(cell_id)
                         # 去重合并单元格：跳过非左上角的水平合并续格
                         if hasattr(cell, 'is_merge_origin'):
                             if cell.is_merge_origin:
                                 row_data.append(_normalize_table_cell(cell.text))
-                            elif col_idx > 0 and row.cells[col_idx - 1] is cell:
-                                # 水平续格（同一对象引用），跳过
-                                continue
                             else:
                                 row_data.append(_normalize_table_cell(cell.text))
                         else:
                             row_data.append(_normalize_table_cell(cell.text))
                     all_rows_data.append(row_data)
                 max_cols = max((len(r) for r in all_rows_data), default=0)
+                if max_cols == 0:
+                    continue
                 for idx, row_data in enumerate(all_rows_data):
                     padded = row_data + [""] * (max_cols - len(row_data))
                     content += "| " + " | ".join(padded) + " |\n"
@@ -730,20 +794,14 @@ def convert_pptx(file_path):
 
             # 处理文本框
             if shape.has_text_frame and shape.text.strip():
-                # 判断是否是标题占位符
-                is_title = False
-                if hasattr(shape, "placeholder_format") and shape.placeholder_format is not None:
-                    ph_idx = shape.placeholder_format.idx
-                    # 0 = title, 1 = center title, 对应 PP_PLACEHOLDER 类型
-                    is_title = ph_idx in (0, 1)
-
-                content += _process_text_frame(shape.text_frame, is_title=is_title)
+                content += _process_text_frame(shape.text_frame, is_title=_shape_is_title(shape))
 
         # 提取备注
         if slide.has_notes_slide and slide.notes_slide.notes_text_frame:
-            notes_text = slide.notes_slide.notes_text_frame.text.strip()
+            notes_text = _normalize_text(slide.notes_slide.notes_text_frame.text, preserve_newlines=True)
             if notes_text:
-                content += f"\n> **备注**: {notes_text}\n\n"
+                quoted_lines = "\n".join(f"> {line}" for line in notes_text.splitlines())
+                content += f"\n> **备注**:\n{quoted_lines}\n\n"
 
         if i < len(presentation.slides):
             content += "---\n\n"
@@ -772,74 +830,89 @@ def _render_pdf_table(table_obj):
     result += "\n"
     return result
 
+def _extract_pdf_page_blocks(page, tables):
+    """提取单页 PDF 的文本和表格块，尽量保持上下顺序"""
+    table_bboxes = [t.bbox for t in tables] if tables else []
+    blocks = []  # (top_position, content_string)
+
+    for table_obj in tables:
+        md = _render_pdf_table(table_obj)
+        if md:
+            blocks.append((table_obj.bbox[1], md))
+
+    if table_bboxes:
+        filtered_page = page
+        for bbox in table_bboxes:
+            filtered_page = filtered_page.filter(
+                lambda obj, b=bbox: not (
+                    obj.get("top", 0) >= b[1] and
+                    obj.get("bottom", 0) <= b[3] and
+                    obj.get("x0", 0) >= b[0] and
+                    obj.get("x1", 0) <= b[2]
+                )
+            )
+
+        text_chars = filtered_page.chars
+        if text_chars:
+            split_tops = sorted(set([0.0] + [b[1] for b in table_bboxes] + [b[3] for b in table_bboxes]))
+            for seg_idx, seg_top in enumerate(split_tops):
+                seg_bottom = split_tops[seg_idx + 1] if seg_idx + 1 < len(split_tops) else float('inf')
+                seg_page = filtered_page.filter(
+                    lambda obj, t=seg_top, b=seg_bottom: obj.get("top", 0) >= t and obj.get("top", 0) < b
+                )
+                seg_text = _normalize_text(seg_page.extract_text(), preserve_newlines=True)
+                if seg_text:
+                    blocks.append((seg_top, "\n".join(_escape_plain_markdown_text(line) for line in seg_text.splitlines()) + "\n\n"))
+        else:
+            text = _normalize_text(filtered_page.extract_text(), preserve_newlines=True)
+            if text:
+                blocks.append((0.0, "\n".join(_escape_plain_markdown_text(line) for line in text.splitlines()) + "\n\n"))
+    else:
+        text = _normalize_text(page.extract_text(), preserve_newlines=True)
+        if text:
+            blocks.append((0.0, "\n".join(_escape_plain_markdown_text(line) for line in text.splitlines()) + "\n\n"))
+
+    blocks.sort(key=lambda block: block[0])
+    return blocks
+
 def convert_pdf(file_path):
     """转换 PDF 文件，支持文本和表格提取，按页面位置交错输出"""
     import pdfplumber
 
-    content = ""
+    content_parts = []
+    page_errors = []
     with pdfplumber.open(file_path) as pdf:
-        for page in pdf.pages:
-            tables = page.find_tables()
-            table_bboxes = [t.bbox for t in tables] if tables else []
+        for page_number, page in enumerate(pdf.pages, 1):
+            try:
+                tables = page.find_tables()
+                blocks = _extract_pdf_page_blocks(page, tables)
+            except Exception as exc:
+                page_errors.append((page_number, str(exc)))
+                try:
+                    fallback_text = _normalize_text(page.extract_text(), preserve_newlines=True)
+                except Exception:
+                    fallback_text = ""
+                if not fallback_text:
+                    continue
+                blocks = [(0.0, "\n".join(_escape_plain_markdown_text(line) for line in fallback_text.splitlines()) + "\n\n")]
 
-            # 收集所有内容块及其垂直位置，统一排序输出
-            blocks = []  # (top_position, content_string)
+            if not blocks:
+                continue
 
-            # 1. 收集表格块
-            for table_obj in tables:
-                md = _render_pdf_table(table_obj)
-                if md:
-                    blocks.append((table_obj.bbox[1], md))
+            page_content = "".join(block_content for _, block_content in blocks).strip()
+            if not page_content:
+                continue
 
-            # 2. 提取非表格区域的文本
-            if table_bboxes:
-                filtered_page = page
-                for bbox in table_bboxes:
-                    filtered_page = filtered_page.filter(
-                        lambda obj, b=bbox: not (
-                            obj.get("top", 0) >= b[1] and
-                            obj.get("bottom", 0) <= b[3] and
-                            obj.get("x0", 0) >= b[0] and
-                            obj.get("x1", 0) <= b[2]
-                        )
-                    )
-                # 按表格边界将文本分段，保留各段的垂直位置
-                text_chars = filtered_page.chars
-                if text_chars:
-                    # 用表格的 top 坐标作为分割点，将文本切分为多个区域
-                    split_tops = sorted(set([0.0] + [b[1] for b in table_bboxes] + [b[3] for b in table_bboxes]))
-                    for seg_idx in range(len(split_tops)):
-                        seg_top = split_tops[seg_idx]
-                        seg_bottom = split_tops[seg_idx + 1] if seg_idx + 1 < len(split_tops) else float('inf')
-                        seg_page = filtered_page.filter(
-                            lambda obj, t=seg_top, b=seg_bottom: (
-                                obj.get("top", 0) >= t and obj.get("top", 0) < b
-                            )
-                        )
-                        seg_text = seg_page.extract_text()
-                        if seg_text and seg_text.strip():
-                            lines = [l.strip() for l in seg_text.split('\n') if l.strip()]
-                            if lines:
-                                blocks.append((seg_top, '\n'.join(lines) + "\n\n"))
-                else:
-                    text = filtered_page.extract_text()
-                    if text and text.strip():
-                        lines = [l.strip() for l in text.split('\n') if l.strip()]
-                        if lines:
-                            blocks.append((0.0, '\n'.join(lines) + "\n\n"))
+            if len(pdf.pages) > 1:
+                content_parts.append(f"## Page {page_number}\n\n{page_content}")
             else:
-                text = page.extract_text()
-                if text and text.strip():
-                    lines = [l.strip() for l in text.split('\n') if l.strip()]
-                    if lines:
-                        blocks.append((0.0, '\n'.join(lines) + "\n\n"))
+                content_parts.append(page_content)
 
-            # 3. 按垂直位置排序后输出
-            blocks.sort(key=lambda b: b[0])
-            for _, block_content in blocks:
-                content += block_content
-
-    return content.strip()
+    content = "\n\n".join(content_parts).strip()
+    if not content and page_errors:
+        page_numbers = ", ".join(str(page_number) for page_number, _ in page_errors)
+        raise ValueError(f"PDF 解析失败，无法提取任何内容。异常页码: {page_numbers}")
+    return content
 
 def convert_md(file_path, output_dir=None):
     """
@@ -972,11 +1045,11 @@ def convert_document(file_path, extract_images=True, output_dir=None):
         包含 'success'、'markdown_content'、'output_path' 和可选 'error' 的字典
     """
     # 验证输入文件
-    file_path = os.path.normpath(file_path)
-    if not os.path.exists(file_path):
+    file_path, input_error = _validate_input_file(file_path)
+    if input_error:
         return {
             'success': False,
-            'error': f'文件不存在: {file_path}'
+            'error': input_error
         }
 
     # 检查文件大小（限制为100MB）
@@ -1029,26 +1102,30 @@ def convert_document(file_path, extract_images=True, output_dir=None):
                 'error': f'不支持的文件类型: {file_ext}'
             }
 
+        warning = None
+        if not markdown_content.strip():
+            if file_ext == '.pdf':
+                return {
+                    'success': False,
+                    'error': 'PDF 未提取到任何文本或表格，文件可能是扫描件、受保护文档，或仅包含图片。请先进行 OCR 或解除保护后再试。'
+                }
+            warning = '未提取到任何可写入的内容，原文档可能为空，或仅包含当前版本暂不支持的对象。'
+
         # 确定输出路径
-        if output_dir:
-            os.makedirs(output_dir, exist_ok=True)
-            output_path = os.path.join(output_dir, os.path.splitext(os.path.basename(file_path))[0] + '.md')
-        else:
-            # 默认：在同目录下创建 Markdown/ 子目录
-            file_dir = os.path.dirname(file_path) or '.'
-            output_dir = os.path.join(file_dir, 'Markdown')
-            os.makedirs(output_dir, exist_ok=True)
-            output_path = os.path.join(output_dir, os.path.splitext(os.path.basename(file_path))[0] + '.md')
+        output_path = _resolve_markdown_output_path(file_path, output_dir)
 
         # 保存 Markdown 文件
         with open(output_path, 'w', encoding='utf-8') as f:
             f.write(markdown_content)
 
-        return {
+        result = {
             'success': True,
             'markdown_content': markdown_content,
             'output_path': output_path
         }
+        if warning:
+            result['warning'] = warning
+        return result
 
     except PermissionError as e:
         return {
@@ -1091,27 +1168,30 @@ def batch_convert(directory, recursive=True, extract_images=True, output_dir=Non
     """
     results = []
 
-    if recursive:
-        # 递归扫描
-        for root, dirs, files in os.walk(directory):
-            for file in files:
-                if os.path.splitext(file)[1].lower() in SUPPORTED_EXTENSIONS:
-                    file_path = os.path.join(root, file)
-                    result = convert_document(file_path, extract_images, output_dir)
-                    results.append({
-                        'file': file_path,
-                        'result': result
-                    })
-    else:
-        # 只扫描当前目录
-        for file in os.listdir(directory):
-            file_path = os.path.join(directory, file)
-            if os.path.isfile(file_path) and os.path.splitext(file)[1].lower() in SUPPORTED_EXTENSIONS:
-                result = convert_document(file_path, extract_images, output_dir)
-                results.append({
-                    'file': file_path,
-                    'result': result
-                })
+    normalized_directory = os.path.abspath(os.path.normpath(os.path.expanduser(str(directory))))
+    if not os.path.exists(normalized_directory):
+        return [{
+            'file': normalized_directory,
+            'result': {
+                'success': False,
+                'error': f'目录不存在: {normalized_directory}'
+            }
+        }]
+    if not os.path.isdir(normalized_directory):
+        return [{
+            'file': normalized_directory,
+            'result': {
+                'success': False,
+                'error': f'输入路径不是目录: {normalized_directory}'
+            }
+        }]
+
+    for file_path in _iter_batch_input_files(normalized_directory, recursive=recursive, output_dir=output_dir):
+        result = convert_document(file_path, extract_images, output_dir)
+        results.append({
+            'file': file_path,
+            'result': result
+        })
 
     return results
 
