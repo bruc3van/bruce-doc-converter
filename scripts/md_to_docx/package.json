@@ -5,7 +5,7 @@
   "main": "index.js",
   "type": "commonjs",
   "scripts": {
-    "test": "node index.js --help"
+    "test": "node --test ../../tests/md_to_docx.test.js"
   },
   "dependencies": {
     "@mermaid-js/mermaid-cli": "^11.12.0",

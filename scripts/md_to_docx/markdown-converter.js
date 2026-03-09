@@ -20,9 +20,9 @@ async function markdownToHTML(markdown) {
 
   // 1. 首先保护代码块
   const codeBlocks = [];
-  html = html.replace(/```([^\n`]*)\s*\n([\s\S]*?)```/g, (match, lang, code) => {
+  html = html.replace(/```([^\n`]*)[ \t]*\n([\s\S]*?)```/g, (match, lang, code) => {
     const placeholder = `\x00CODEBLOCK${codeBlocks.length}\x00`;
-    codeBlocks.push({ lang: lang || '', code: code.trim() });
+    codeBlocks.push({ lang: lang || '', code: normalizeCodeBlockContent(code) });
     return placeholder;
   });
 
@@ -35,19 +35,10 @@ async function markdownToHTML(markdown) {
   });
 
   // 3. 保护图片和链接语法（避免路径中的下划线/星号被误处理为粗体斜体）
-  const images = [];
-  html = html.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (match, alt, url) => {
-    const placeholder = `\x00IMAGE${images.length}\x00`;
-    images.push({ alt, url });
-    return placeholder;
-  });
-
-  const links = [];
-  html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (match, text, url) => {
-    const placeholder = `\x00LINK${links.length}\x00`;
-    links.push({ text, url });
-    return placeholder;
-  });
+  const protectedLinks = protectMarkdownLinksAndImages(html);
+  html = protectedLinks.text;
+  const images = protectedLinks.images;
+  const links = protectedLinks.links;
 
   // 处理标题
   html = html.replace(/^######\s+(.+)$/gm, '<h6>$1</h6>');
@@ -143,6 +134,181 @@ function escapeHTML(text) {
     "'": '&#039;'
   };
   return text.replace(/[&<>"']/g, char => map[char]);
+}
+
+function normalizeCodeBlockContent(code) {
+  if (typeof code !== 'string') {
+    return '';
+  }
+  return code.replace(/\r\n?/g, '\n').replace(/\n$/, '');
+}
+
+function protectMarkdownLinksAndImages(markdown) {
+  const images = [];
+  const links = [];
+  let result = '';
+
+  for (let i = 0; i < markdown.length;) {
+    const imageToken = markdown[i] === '!' ? parseMarkdownLinkToken(markdown, i, true) : null;
+    if (imageToken) {
+      const placeholder = `\x00IMAGE${images.length}\x00`;
+      images.push({ alt: imageToken.label, url: imageToken.url });
+      result += placeholder;
+      i = imageToken.end + 1;
+      continue;
+    }
+
+    const linkToken = markdown[i] === '[' ? parseMarkdownLinkToken(markdown, i, false) : null;
+    if (linkToken) {
+      const placeholder = `\x00LINK${links.length}\x00`;
+      links.push({ text: linkToken.label, url: linkToken.url });
+      result += placeholder;
+      i = linkToken.end + 1;
+      continue;
+    }
+
+    result += markdown[i];
+    i += 1;
+  }
+
+  return { text: result, images, links };
+}
+
+function parseMarkdownLinkToken(source, startIndex, isImage) {
+  let cursor = startIndex;
+  if (isImage) {
+    if (source[cursor] !== '!' || source[cursor + 1] !== '[') {
+      return null;
+    }
+    cursor += 1;
+  }
+
+  if (source[cursor] !== '[') {
+    return null;
+  }
+
+  const labelSection = readBalancedSection(source, cursor, '[', ']');
+  if (!labelSection) {
+    return null;
+  }
+
+  cursor = labelSection.end + 1;
+  while (cursor < source.length && /\s/.test(source[cursor]) && source[cursor] !== '\n') {
+    cursor += 1;
+  }
+
+  if (source[cursor] !== '(') {
+    return null;
+  }
+
+  const destinationSection = readBalancedSection(source, cursor, '(', ')');
+  if (!destinationSection) {
+    return null;
+  }
+
+  const url = extractLinkDestination(destinationSection.value);
+  if (!url) {
+    return null;
+  }
+
+  return {
+    label: labelSection.value,
+    url,
+    end: destinationSection.end
+  };
+}
+
+function readBalancedSection(source, startIndex, openChar, closeChar) {
+  if (source[startIndex] !== openChar) {
+    return null;
+  }
+
+  let depth = 0;
+  let value = '';
+  let escaped = false;
+
+  for (let i = startIndex + 1; i < source.length; i++) {
+    const char = source[i];
+
+    if (escaped) {
+      value += char;
+      escaped = false;
+      continue;
+    }
+
+    if (char === '\\') {
+      escaped = true;
+      value += char;
+      continue;
+    }
+
+    if (char === openChar) {
+      depth += 1;
+      value += char;
+      continue;
+    }
+
+    if (char === closeChar) {
+      if (depth === 0) {
+        return { value, end: i };
+      }
+      depth -= 1;
+      value += char;
+      continue;
+    }
+
+    value += char;
+  }
+
+  return null;
+}
+
+function extractLinkDestination(rawValue) {
+  const trimmed = (rawValue || '').trim();
+  if (!trimmed) {
+    return '';
+  }
+
+  if (trimmed.startsWith('<')) {
+    const endIndex = trimmed.indexOf('>');
+    if (endIndex > 1) {
+      return trimmed.slice(1, endIndex);
+    }
+  }
+
+  let destination = '';
+  let escaped = false;
+  let nestedParens = 0;
+
+  for (let i = 0; i < trimmed.length; i++) {
+    const char = trimmed[i];
+
+    if (escaped) {
+      destination += char;
+      escaped = false;
+      continue;
+    }
+
+    if (char === '\\') {
+      escaped = true;
+      destination += char;
+      continue;
+    }
+
+    if (/\s/.test(char) && nestedParens === 0) {
+      break;
+    }
+
+    if (char === '(') {
+      nestedParens += 1;
+    } else if (char === ')' && nestedParens > 0) {
+      nestedParens -= 1;
+    }
+
+    destination += char;
+  }
+
+  return destination.trim();
 }
 
 /**
@@ -290,9 +456,7 @@ function processTables(html) {
         inTable = true;
       }
 
-      const cellContent = line.slice(1, -1);
-      const cells = cellContent.split('|');
-      tableRows.push(cells.map(cell => cell.trim()));
+      tableRows.push(splitMarkdownTableRow(line));
     } else {
       if (inTable) {
         result.push(buildTable(tableRows));
@@ -342,6 +506,34 @@ function buildTable(rows) {
 
   html += '</table>';
   return html;
+}
+
+function splitMarkdownTableRow(line) {
+  const content = line.slice(1, -1);
+  const cells = [];
+  let current = '';
+
+  for (let i = 0; i < content.length; i++) {
+    const char = content[i];
+    const next = content[i + 1];
+
+    if (char === '\\' && (next === '|' || next === '\\')) {
+      current += next;
+      i += 1;
+      continue;
+    }
+
+    if (char === '|') {
+      cells.push(current.trim());
+      current = '';
+      continue;
+    }
+
+    current += char;
+  }
+
+  cells.push(current.trim());
+  return cells;
 }
 
 /**

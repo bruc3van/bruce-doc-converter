@@ -7,7 +7,7 @@
 const { JSDOM } = require('jsdom');
 const fs = require('fs');
 const path = require('path');
-const { Paragraph, TextRun, ImageRun, Table, TableRow, TableCell, WidthType, BorderStyle, AlignmentType, VerticalAlign } = require('docx');
+const { Paragraph, TextRun, ImageRun, Table, TableRow, TableCell, WidthType, BorderStyle, AlignmentType, VerticalAlign, ExternalHyperlink } = require('docx');
 const { charsToTwips } = require('./styles');
 
 // Node 类型常量
@@ -511,6 +511,29 @@ function safeDecodeURIComponent(value) {
   }
 }
 
+function mergeInlineOptions(baseOptions = {}, nextOptions = {}) {
+  return {
+    ...baseOptions,
+    ...nextOptions,
+    runStyle: {
+      ...(baseOptions.runStyle || {}),
+      ...(nextOptions.runStyle || {})
+    }
+  };
+}
+
+function normalizeInlineText(text) {
+  if (!text) {
+    return '';
+  }
+
+  const collapsed = text.replace(/\s+/g, ' ');
+  if (!collapsed.trim()) {
+    return /[ \t]/.test(text) ? ' ' : '';
+  }
+  return collapsed;
+}
+
 /**
  * 转换列表元素
  */
@@ -571,7 +594,7 @@ function convertList(listElement, level = 0) {
         }
       }
 
-      currentRuns.push(...convertInlineNodes([child], true));
+      currentRuns.push(...convertInlineNodes([child], { skipNestedLists: true }));
     }
 
     if (!hasNumberedParagraph) {
@@ -652,7 +675,9 @@ function convertTable(tableElement) {
  * 转换表格单元格内容
  */
 function convertCellContent(cellElement, isHeader = false) {
-  const runs = convertInlineNodes(cellElement.childNodes, false, isHeader);
+  const runs = convertInlineNodes(cellElement.childNodes, {
+    runStyle: isHeader ? { bold: true, size: 24 } : {}
+  });
   return [new Paragraph({
     children: runs.length > 0 ? runs : [new TextRun('')],
     alignment: (isHeader || cellElement.nodeName === 'TH') ? AlignmentType.CENTER : AlignmentType.LEFT
@@ -725,77 +750,107 @@ function convertChildren(containerElement) {
 }
 
 /**
- * 转换内联元素为 TextRun 数组
+ * 转换内联元素为 TextRun / Hyperlink 数组
  * @param {NodeList} nodes - 节点列表
- * @param {boolean} skipNestedLists - 是否跳过嵌套列表
+ * @param {object} options - 递归内联转换选项
  */
-function convertInlineNodes(nodes, skipNestedLists = false, applyBold = false) {
+function convertInlineNodes(nodes, options = {}) {
   const runs = [];
+  const { skipNestedLists = false, runStyle = {} } = options;
 
   for (const node of nodes) {
     if (node.nodeType === NODE_TYPE.TEXT_NODE) {
-      const text = node.textContent;
-      if (text && text.trim()) {
-        runs.push(...createTextRunsWithEmoji(text, applyBold ? { bold: true, size: 24 } : {}));
+      const text = normalizeInlineText(node.textContent);
+      if (text) {
+        runs.push(...createTextRunsWithEmoji(text, runStyle));
       }
-    } else if (node.nodeType === NODE_TYPE.ELEMENT_NODE) {
-      const tagName = node.nodeName.toUpperCase();
+      continue;
+    }
 
-      // 跳过嵌套列表
-      if (skipNestedLists && (tagName === 'UL' || tagName === 'OL')) {
-        continue;
-      }
+    if (node.nodeType !== NODE_TYPE.ELEMENT_NODE) {
+      continue;
+    }
 
-      switch (tagName) {
-        case 'STRONG':
-        case 'B':
-          runs.push(...createTextRunsWithEmoji(node.textContent, { bold: true, ...(applyBold ? { size: 24 } : {}) }));
-          break;
+    const tagName = node.nodeName.toUpperCase();
 
-        case 'EM':
-        case 'I':
-          runs.push(...createTextRunsWithEmoji(node.textContent, { italics: true, ...(applyBold ? { bold: true, size: 24 } : {}) }));
-          break;
+    if (skipNestedLists && (tagName === 'UL' || tagName === 'OL')) {
+      continue;
+    }
 
-        case 'DEL':
-        case 'S':
-          runs.push(...createTextRunsWithEmoji(node.textContent, { strike: true, ...(applyBold ? { bold: true, size: 24 } : {}) }));
-          break;
+    switch (tagName) {
+      case 'STRONG':
+      case 'B':
+        runs.push(...convertInlineNodes(
+          node.childNodes,
+          mergeInlineOptions(options, { runStyle: { bold: true } })
+        ));
+        break;
 
-        case 'CODE':
-          runs.push(new TextRun({
-            text: node.textContent,
-            font: "Consolas",
-            size: 22,
-            color: "DC2626",
-            ...(applyBold ? { bold: true } : {})
+      case 'EM':
+      case 'I':
+        runs.push(...convertInlineNodes(
+          node.childNodes,
+          mergeInlineOptions(options, { runStyle: { italics: true } })
+        ));
+        break;
+
+      case 'DEL':
+      case 'S':
+        runs.push(...convertInlineNodes(
+          node.childNodes,
+          mergeInlineOptions(options, { runStyle: { strike: true } })
+        ));
+        break;
+
+      case 'CODE':
+        runs.push(...createTextRunsWithEmoji(node.textContent, {
+          ...runStyle,
+          font: "Consolas",
+          size: 22,
+          color: "DC2626"
+        }));
+        break;
+
+      case 'A': {
+        const hyperlinkRuns = convertInlineNodes(
+          node.childNodes,
+          mergeInlineOptions(options, { runStyle: { color: "2563EB", underline: {} } })
+        );
+        const href = (node.getAttribute('href') || '').trim();
+        if (href && hyperlinkRuns.length > 0) {
+          runs.push(new ExternalHyperlink({
+            link: href,
+            children: hyperlinkRuns
           }));
-          break;
-
-        case 'A':
-          runs.push(...createTextRunsWithEmoji(node.textContent, { color: "2563EB", underline: {}, ...(applyBold ? { bold: true, size: 24 } : {}) }));
-          break;
-
-        case 'BR':
-          runs.push(new TextRun({ text: '', break: 1 }));
-          break;
-
-        case 'IMG': {
-          const imageRun = createImageRun(node);
-          if (imageRun) {
-            runs.push(imageRun);
-          } else {
-            const alt = node.getAttribute('alt') || '图片';
-            const src = node.getAttribute('src') || '';
-            const fallbackText = src ? `[图片: ${alt}] (${src})` : `[图片: ${alt}]`;
-            runs.push(new TextRun({ text: fallbackText, italics: true, color: "6B7280" }));
-          }
-          break;
+        } else {
+          runs.push(...hyperlinkRuns);
         }
-
-        default:
-          runs.push(...convertInlineNodes(node.childNodes, skipNestedLists, applyBold));
+        break;
       }
+
+      case 'BR':
+        runs.push(new TextRun({ text: '', break: 1 }));
+        break;
+
+      case 'IMG': {
+        const imageRun = createImageRun(node);
+        if (imageRun) {
+          runs.push(imageRun);
+        } else {
+          const alt = node.getAttribute('alt') || '图片';
+          const src = node.getAttribute('src') || '';
+          const fallbackText = src ? `[图片: ${alt}] (${src})` : `[图片: ${alt}]`;
+          runs.push(...createTextRunsWithEmoji(fallbackText, {
+            ...runStyle,
+            italics: true,
+            color: "6B7280"
+          }));
+        }
+        break;
+      }
+
+      default:
+        runs.push(...convertInlineNodes(node.childNodes, options));
     }
   }
 
