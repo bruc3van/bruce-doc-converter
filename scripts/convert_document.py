@@ -437,9 +437,33 @@ def convert_docx(file_path):
         style_id = getattr(style, "style_id", "") if style else ""
 
         # 先拼接富文本（列表项也需要保留粗体/斜体）
-        formatted_text = ""
+        # 将相邻同格式的 run 合并后再添加 Markdown 标记，避免 **text1****text2** 碎片
+        groups = []
         for run in para.runs:
-            formatted_text += format_run_text(run)
+            text = run.text
+            if not text:
+                continue
+            fmt = (bool(run.bold), bool(run.italic))
+            if groups and groups[-1][0] == fmt:
+                groups[-1] = (fmt, groups[-1][1] + text)
+            else:
+                groups.append((fmt, text))
+        formatted_text = ""
+        for (bold, italic), text in groups:
+            if bold or italic:
+                stripped = text.strip()
+                if not stripped:
+                    # 纯空白的格式组，作为普通空白输出
+                    formatted_text += text
+                    continue
+                if bold and italic:
+                    formatted_text += f"***{stripped}***"
+                elif bold:
+                    formatted_text += f"**{stripped}**"
+                else:
+                    formatted_text += f"*{stripped}*"
+            else:
+                formatted_text += text
         text_value = (formatted_text.strip() or para.text.strip()).replace("\n", " ").strip()
         if not text_value:
             return ""
@@ -501,14 +525,25 @@ def convert_docx(file_path):
         elif element.tag.endswith('tbl'):
             table = next(tables_iter, None)
             if table is not None:
-                for i, row in enumerate(table.rows):
-                    row_data = [_normalize_table_cell(cell.text) for cell in row.cells]
+                # 两遍处理：先收集去重后的行数据，再统一列数输出
+                all_rows_data = []
+                for row in table.rows:
+                    # 去重合并单元格：python-docx 对合并单元格会返回重复的 _tc 引用
+                    seen_tcs = set()
+                    unique_cells = []
+                    for cell in row.cells:
+                        tc_id = id(cell._tc)
+                        if tc_id not in seen_tcs:
+                            seen_tcs.add(tc_id)
+                            unique_cells.append(cell)
+                    all_rows_data.append([_normalize_table_cell(cell.text) for cell in unique_cells])
 
-                    if i == 0:  # 表头
-                        content += "| " + " | ".join(row_data) + " |\n"
-                        content += "| " + " | ".join(["---"] * len(row_data)) + " |\n"
-                    else:
-                        content += "| " + " | ".join(row_data) + " |\n"
+                max_cols = max((len(r) for r in all_rows_data), default=0)
+                for i, row_data in enumerate(all_rows_data):
+                    padded = row_data + [""] * (max_cols - len(row_data))
+                    content += "| " + " | ".join(padded) + " |\n"
+                    if i == 0:
+                        content += "| " + " | ".join(["---"] * max_cols) + " |\n"
                 content += "\n"
 
     return content.strip()
