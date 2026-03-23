@@ -8,10 +8,10 @@ const { AlignmentType, BorderStyle, TabStopType } = require('docx');
 /**
  * 将字符数转换为 twips (用于缩进)
  * @param {number} chars - 字符数
- * @param {number} fontSize - 字号(pt)，默认为14pt
+ * @param {number} fontSize - 字号(pt)，默认为12pt
  * @returns {number} twips 值
  */
-function charsToTwips(chars, fontSize = 14) {
+function charsToTwips(chars, fontSize = 12) {
   // 1 字符 ≈ 1 个字号大小
   // 1 pt = 20 twips
   return chars * fontSize * 20;
@@ -26,7 +26,7 @@ function createStyles() {
       document: {
         run: {
           font: "SimSun", // 宋体
-          size: 28  // 14pt (半磅为单位: 14 * 2 = 28)
+          size: 24  // 12pt (半磅为单位: 12 * 2 = 24)
         },
         paragraph: {
           spacing: {
@@ -53,7 +53,7 @@ function createStyles() {
         paragraph: {
           alignment: AlignmentType.CENTER,
           spacing: {
-            before: 480,  // 24pt before
+            before: 360,  // 18pt before
             after: 240,   // 12pt after
             line: 240     // 单倍行距
           },
@@ -76,7 +76,7 @@ function createStyles() {
         paragraph: {
           spacing: {
             before: 360,  // 18pt
-            after: 180,   // 9pt
+            after: 200,   // 10pt
             line: 240     // 单倍行距
           },
           indent: {
@@ -98,7 +98,7 @@ function createStyles() {
         paragraph: {
           spacing: {
             before: 300,  // 15pt
-            after: 150,   // 7.5pt
+            after: 160,   // 8pt
             line: 240     // 单倍行距
           },
           indent: {
@@ -295,10 +295,10 @@ function createStyles() {
  */
 function createMargins() {
   return {
-    top: 2098,     // 3.7cm
-    bottom: 1985,  // 3.5cm
-    left: 1588,    // 2.8cm
-    right: 1474    // 2.6cm
+    top: 1417,     // 2.5cm
+    bottom: 1417,  // 2.5cm
+    left: 1417,    // 2.5cm
+    right: 1417    // 2.5cm
   };
 }
 
