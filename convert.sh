@@ -1,5 +1,5 @@
 #!/bin/bash
-# DocuGenius Converter - 自动检测并使用系统 Python
+# Bruce Doc Converter - 自动检测并使用系统 Python
 
 # 获取脚本所在目录
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

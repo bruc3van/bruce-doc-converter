@@ -8,10 +8,10 @@ const os = require('os');
 const path = require('path');
 const { spawn } = require('child_process');
 
-const MMDC_TIMEOUT_MS = Number.parseInt(process.env.DOCUGENIUS_MMDC_TIMEOUT_MS || '90000', 10);
-const MMDC_FORMAT = (process.env.DOCUGENIUS_MMDC_FORMAT || 'png').toLowerCase();
-const MMDC_SCALE = Number.parseFloat(process.env.DOCUGENIUS_MMDC_SCALE || '2');
-const TEMP_DIR_PREFIX = 'docugenius-mmdc-';
+const MMDC_TIMEOUT_MS = Number.parseInt(process.env.BRUCE_DOC_CONVERTER_MMDC_TIMEOUT_MS || '90000', 10);
+const MMDC_FORMAT = (process.env.BRUCE_DOC_CONVERTER_MMDC_FORMAT || 'png').toLowerCase();
+const MMDC_SCALE = Number.parseFloat(process.env.BRUCE_DOC_CONVERTER_MMDC_SCALE || '2');
+const TEMP_DIR_PREFIX = 'bruce-doc-converter-mmdc-';
 
 const MERMAID_CONFIG = {
   startOnLoad: false,
@@ -126,8 +126,8 @@ function resolveMMDCCommand() {
   const candidates = [];
   const ext = process.platform === 'win32' ? '.cmd' : '';
 
-  if (process.env.DOCUGENIUS_MMDC_PATH) {
-    candidates.push(process.env.DOCUGENIUS_MMDC_PATH);
+  if (process.env.BRUCE_DOC_CONVERTER_MMDC_PATH) {
+    candidates.push(process.env.BRUCE_DOC_CONVERTER_MMDC_PATH);
   }
 
   candidates.push(path.join(__dirname, 'node_modules', '.bin', `mmdc${ext}`));
@@ -166,16 +166,16 @@ function resolveMMDCCommand() {
 }
 
 function resolveSharedNodeRoot() {
-  if (process.env.DOCUGENIUS_NODE_HOME) {
-    return process.env.DOCUGENIUS_NODE_HOME;
+  if (process.env.BRUCE_DOC_CONVERTER_NODE_HOME) {
+    return process.env.BRUCE_DOC_CONVERTER_NODE_HOME;
   }
 
   if (process.platform === 'win32') {
     const base = process.env.LOCALAPPDATA || process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Local');
-    return path.join(base, 'DocuGenius', 'node');
+    return path.join(base, 'BruceDocConverter', 'node');
   }
 
-  return path.join(os.homedir(), '.docugenius', 'node');
+  return path.join(os.homedir(), '.bruce-doc-converter', 'node');
 }
 
 function buildPuppeteerConfig() {

@@ -1,4 +1,4 @@
-# DocuGenius Converter - PowerShell Edition
+# Bruce Doc Converter - PowerShell Edition
 # Auto-detect and use system Python with UTF-8 output
 
 # Set output encoding to UTF-8

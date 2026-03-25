@@ -1,4 +1,4 @@
-# DocuGenius Converter Skill
+# Bruce Doc Converter Skill
 
 > Bi-directional document conversion for Claude Code / OpenClaw
 
@@ -6,7 +6,7 @@
 [![Python](https://img.shields.io/badge/Python-3.6+-blue.svg)](https://www.python.org/downloads/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-**DocuGenius Converter** is an **Agent Skill** that gives **Claude Code / OpenClaw** bi-directional document conversion capabilities. Once installed, your AI can:
+**Bruce Doc Converter** is an **Agent Skill** that gives **Claude Code / OpenClaw** bi-directional document conversion capabilities. Once installed, your AI can:
 
 - **Office/PDF → Markdown**: Convert Word, Excel, PowerPoint, and PDF files into AI-friendly Markdown for analysis
 - **Markdown → Word**: Export Markdown as a **professionally formatted Word document** with automatic styles and layout
@@ -41,7 +41,7 @@ This skill solves that problem:
 
 ### Lightweight & Token-Efficient
 
-Unlike general-purpose skills that write conversion code on the fly, DocuGenius Converter ships with pre-built conversion scripts:
+Unlike general-purpose skills that write conversion code on the fly, Bruce Doc Converter ships with pre-built conversion scripts:
 
 - **Single call, immediate result**: The AI doesn't need to reason about how to handle the file or write code — it just calls the pre-built script and gets a structured result back
 - **Saves tokens**: No more multi-round "write code → run → error → fix" loops; one call returns the converted content
@@ -56,7 +56,7 @@ Unlike general-purpose skills that write conversion code on the fly, DocuGenius 
 Send this to Claude Code or OpenClaw:
 
 ```
-Install this skill for me: https://github.com/brucevanfdm/docugenius-converter-skill
+Install this skill for me: https://github.com/brucevanfdm/bruce-doc-converter
 ```
 
 The AI will clone the repo and configure everything automatically. Dependencies are installed on first use — no manual steps required.
@@ -72,10 +72,10 @@ If you prefer to do it yourself:
 
 ```bash
 # macOS/Linux
-git clone https://github.com/brucevanfdm/docugenius-converter-skill.git ~/.claude/skills/docugenius-converter
+git clone https://github.com/brucevanfdm/bruce-doc-converter.git ~/.claude/skills/bruce-doc-converter
 
 # Windows
-git clone https://github.com/brucevanfdm/docugenius-converter-skill.git %USERPROFILE%\.claude\skills\docugenius-converter
+git clone https://github.com/brucevanfdm/bruce-doc-converter.git %USERPROFILE%\.claude\skills\bruce-doc-converter
 ```
 
 Dependencies install automatically on first use. If auto-install fails, run manually:
@@ -98,7 +98,7 @@ pip install --user python-docx openpyxl python-pptx pdfplumber
 **Inside Claude Code / OpenClaw on Windows**, the agent typically runs in Git Bash, so use the PowerShell approach:
 
 ```bash
-powershell.exe -Command "Set-Location 'C:\path\to\docugenius-converter-skill'; .\convert.ps1 'C:\path\to\file.docx'"
+powershell.exe -Command "Set-Location 'C:\path\to\bruce-doc-converter-skill'; .\convert.ps1 'C:\path\to\file.docx'"
 ```
 
 ### Conversation Examples
@@ -227,7 +227,7 @@ If it still fails, the conversion won't abort — the document will fall back to
 ## Project Structure
 
 ```
-docugenius-converter-skill/
+bruce-doc-converter-skill/
 ├── SKILL.md                 # Agent Skill definition
 ├── convert.sh               # Runner script (macOS/Linux)
 ├── convert.bat              # Runner script (Windows CMD)

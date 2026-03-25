@@ -1,7 +1,7 @@
 {
   "name": "md-to-docx",
   "version": "1.0.0",
-  "description": "Markdown to DOCX converter for docugenius-converter-skill",
+  "description": "Markdown to DOCX converter for bruce-doc-converter",
   "main": "index.js",
   "type": "commonjs",
   "scripts": {

@@ -25,7 +25,7 @@ import io
 SUPPORTED_EXTENSIONS = ['.docx', '.xlsx', '.pptx', '.pdf', '.md']
 MAX_FILE_SIZE_BYTES = 100 * 1024 * 1024
 NODE_CONVERT_TIMEOUT_SECONDS = 120
-NODE_SHARED_HOME_ENV = "DOCUGENIUS_NODE_HOME"
+NODE_SHARED_HOME_ENV = "BRUCE_DOC_CONVERTER_NODE_HOME"
 GENERATED_OUTPUT_DIR_NAMES = {"Markdown", "Word"}
 
 def _configure_windows_stdio():
@@ -116,9 +116,9 @@ def _get_node_shared_root():
         base = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA")
         if not base:
             base = os.path.join(os.path.expanduser("~"), "AppData", "Local")
-        return os.path.join(base, "DocuGenius", "node")
+        return os.path.join(base, "BruceDocConverter", "node")
 
-    return os.path.join(os.path.expanduser("~"), ".docugenius", "node")
+    return os.path.join(os.path.expanduser("~"), ".bruce-doc-converter", "node")
 
 def _sync_shared_package_files(source_dir, target_dir):
     for filename in ("package.json", "package-lock.json"):
@@ -148,7 +148,7 @@ def _ensure_shared_node_modules(shared_dir, source_dir):
 
     cmd = [npm_cmd, "install", "--no-fund", "--no-audit"]
     try:
-        print("[DocuGenius] 正在安装 Node.js 依赖到用户共享目录...", file=sys.stderr)
+        print("[BruceDocConverter] 正在安装 Node.js 依赖到用户共享目录...", file=sys.stderr)
         result = subprocess.run(
             cmd,
             cwd=shared_dir,
@@ -213,8 +213,8 @@ def install_dependencies(pip_packages):
 
         try:
             # 显示安装提示（仅在首次安装时）
-            print(f"[DocuGenius] 正在安装缺失的依赖: {', '.join(pip_packages)}", file=sys.stderr)
-            print(f"[DocuGenius] 安装位置: {location_desc}", file=sys.stderr)
+            print(f"[BruceDocConverter] 正在安装缺失的依赖: {', '.join(pip_packages)}", file=sys.stderr)
+            print(f"[BruceDocConverter] 安装位置: {location_desc}", file=sys.stderr)
 
             # 运行安装命令
             result = subprocess.run(
@@ -227,7 +227,7 @@ def install_dependencies(pip_packages):
             )
 
             if result.returncode == 0:
-                print(f"[DocuGenius] 依赖安装成功！", file=sys.stderr)
+                print(f"[BruceDocConverter] 依赖安装成功！", file=sys.stderr)
                 return True, None
 
             # 检查错误类型，决定是否尝试下一种方法
@@ -988,7 +988,7 @@ def convert_md(file_path, output_dir=None):
 
         mmdc_binary = local_mmdc or shared_mmdc
         if mmdc_binary:
-            env["DOCUGENIUS_MMDC_PATH"] = mmdc_binary
+            env["BRUCE_DOC_CONVERTER_MMDC_PATH"] = mmdc_binary
 
         result = subprocess.run(
             cmd,

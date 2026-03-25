@@ -1,5 +1,5 @@
 @echo off
-REM DocuGenius Converter - 自动检测并使用系统 Python
+REM Bruce Doc Converter - 自动检测并使用系统 Python
 
 REM 获取脚本所在目录
 set "SCRIPT_DIR=%~dp0"

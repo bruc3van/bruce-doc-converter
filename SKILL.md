@@ -1,8 +1,8 @@
 ---
-name: docugenius-converter
+name: bruce-doc-converter
 description: 双向文档转换工具，将 Word (.docx)、Excel (.xlsx)、PowerPoint (.pptx) 和 PDF (.pdf) 转换为 AI 友好的 Markdown 格式，或将 Markdown (.md) 转换为 Word (.docx) 格式。当用户请求以下操作时使用：(1) 明确请求文档转换，包括任何包含"转换"、"转为"、"转成"、"convert"、"导出"、"export"等词汇的请求（例如："转换文档"、"把这个文件转为docx"、"convert to markdown"、"导出为Word"）；(2) 需要 AI 理解文档内容（"帮我分析这个 Word 文件"、"读取这个 PDF"、"总结这个 Excel"）；(3) 上传文档文件并询问内容（"这是什么"、"帮我看看"）；(4) 任何涉及 .docx、.xlsx、.pptx、.pdf、.md 文件格式转换的请求。
 ---
-# DocuGenius Document Converter
+# Bruce Doc Converter
 
 双向文档转换工具，将 Word (.docx)、Excel (.xlsx)、PowerPoint (.pptx) 和 PDF (.pdf) 转换为 AI 友好的 Markdown 格式，或将 Markdown (.md) 转换为 Word (.docx) 格式。
 
@@ -51,7 +51,7 @@ description: 双向文档转换工具，将 Word (.docx)、Excel (.xlsx)、Power
   ```
 - 路径中包含空格时，使用单引号包裹
 - 使用 `Set-Location` 而不是 `cd`，避免 PowerShell 语法错误
-- `<skill-dir>` 替换为实际的 skill 目录路径（例如 `C:\Users\<YourName>\.claude\skills\docugenius-converter-skill`）
+- `<skill-dir>` 替换为实际的 skill 目录路径（例如 `C:\Users\<YourName>\.claude\skills\bruce-doc-converter-skill`）
 
 ### 命令示例
 
@@ -117,6 +117,6 @@ bash convert.sh --batch /path/to/documents
 其他：
 
 - Python 依赖会自动安装到用户目录
-- Node.js 依赖会自动安装到用户级共享目录（可用 `DOCUGENIUS_NODE_HOME` 指定）
-- 默认共享目录：macOS/Linux `~/.docugenius/node/md_to_docx`，Windows `%LOCALAPPDATA%\DocuGenius\node\md_to_docx`
+- Node.js 依赖会自动安装到用户级共享目录（可用 `BRUCE_DOC_CONVERTER_NODE_HOME` 指定）
+- 默认共享目录：macOS/Linux `~/.bruce-doc-converter/node/md_to_docx`，Windows `%LOCALAPPDATA%\BruceDocConverter\node\md_to_docx`
 - .doc/.xls/.ppt 旧格式需先转换为对应的新格式
