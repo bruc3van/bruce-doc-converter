@@ -700,12 +700,13 @@ function convertCellContent(cellElement, isHeader = false) {
  * 处理混合的内联元素（STRONG、EM 等）和文本节点，按换行拆分为多个段落
  */
 function convertBlockquote(blockquoteElement) {
-  const paragraphs = [];
+  // 先收集每段的 runs，最后统一构建 Paragraph，以便按位置控制间距
+  const paragraphRunsList = [];
   let currentRuns = [];
 
   const flushRuns = () => {
     if (currentRuns.length > 0) {
-      paragraphs.push(new Paragraph({ children: currentRuns, style: "Quote" }));
+      paragraphRunsList.push(currentRuns);
       currentRuns = [];
     }
   };
@@ -713,8 +714,7 @@ function convertBlockquote(blockquoteElement) {
   for (const child of blockquoteElement.childNodes) {
     if (child.nodeName === 'P') {
       flushRuns();
-      const runs = convertInlineNodes(child.childNodes);
-      paragraphs.push(new Paragraph({ children: runs, style: "Quote" }));
+      paragraphRunsList.push(convertInlineNodes(child.childNodes));
     } else if (child.nodeType === NODE_TYPE.TEXT_NODE) {
       const text = child.textContent;
       const parts = text.split('\n');
@@ -734,10 +734,19 @@ function convertBlockquote(blockquoteElement) {
 
   flushRuns();
 
-  return paragraphs.length > 0 ? paragraphs : [new Paragraph({
-    text: blockquoteElement.textContent,
-    style: "Quote"
-  })];
+  if (paragraphRunsList.length === 0) {
+    return [new Paragraph({ text: blockquoteElement.textContent, style: "Quote" })];
+  }
+
+  // 多段落引用块：只有最后一段保留 after 间距，其余段落 after 设为 0，避免段间距叠加
+  return paragraphRunsList.map((runs, i) => {
+    const isLast = i === paragraphRunsList.length - 1;
+    return new Paragraph({
+      children: runs,
+      style: "Quote",
+      ...(isLast ? {} : { spacing: { after: 0 } })
+    });
+  });
 }
 
 /**
