@@ -29,6 +29,7 @@ NODE_CONVERT_TIMEOUT_SECONDS = 120
 NODE_SHARED_HOME_ENV = "BRUCE_DOC_CONVERTER_NODE_HOME"
 GENERATED_OUTPUT_DIR_NAMES = {"Markdown", "Word"}
 DOCX_XML_NAMESPACES = {'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'}
+DOCX_W_NS = DOCX_XML_NAMESPACES['w']
 
 def _configure_windows_stdio():
     """
@@ -477,12 +478,250 @@ def _extract_docx_table_cell_text(tc):
     text_nodes = root.findall('.//w:t', DOCX_XML_NAMESPACES)
     return _normalize_table_cell(''.join(node.text for node in text_nodes if node.text))
 
+def _docx_attr(node, attr_name):
+    """读取 WordprocessingML 命名空间属性值"""
+    if node is None:
+        return None
+    return node.attrib.get(f'{{{DOCX_W_NS}}}{attr_name}')
+
+def _build_docx_numbering_index(doc):
+    """构建 numId -> 抽象编号定义 的索引，支持多级编号渲染"""
+    try:
+        root = ET.fromstring(doc.part.numbering_part.element.xml)
+    except Exception:
+        return {}, {}
+
+    num_to_abstract = {}
+    abstract_levels = {}
+
+    for num_node in root.findall('.//w:num', DOCX_XML_NAMESPACES):
+        num_id = _docx_attr(num_node, 'numId')
+        abstract_node = num_node.find('./w:abstractNumId', DOCX_XML_NAMESPACES)
+        abstract_id = _docx_attr(abstract_node, 'val')
+        if num_id and abstract_id:
+            num_to_abstract[str(num_id)] = str(abstract_id)
+
+    for abstract_node in root.findall('.//w:abstractNum', DOCX_XML_NAMESPACES):
+        abstract_id = _docx_attr(abstract_node, 'abstractNumId')
+        if not abstract_id:
+            continue
+
+        levels = {}
+        for level_node in abstract_node.findall('./w:lvl', DOCX_XML_NAMESPACES):
+            ilvl_raw = _docx_attr(level_node, 'ilvl')
+            try:
+                ilvl = int(ilvl_raw)
+            except (TypeError, ValueError):
+                continue
+
+            start_node = level_node.find('./w:start', DOCX_XML_NAMESPACES)
+            num_fmt_node = level_node.find('./w:numFmt', DOCX_XML_NAMESPACES)
+            lvl_text_node = level_node.find('./w:lvlText', DOCX_XML_NAMESPACES)
+
+            try:
+                start = int(_docx_attr(start_node, 'val') or 1)
+            except (TypeError, ValueError):
+                start = 1
+
+            levels[ilvl] = {
+                'start': start,
+                'num_fmt': _docx_attr(num_fmt_node, 'val') or '',
+                'lvl_text': _docx_attr(lvl_text_node, 'val') or f'%{ilvl + 1}.',
+            }
+
+        if levels:
+            abstract_levels[str(abstract_id)] = levels
+
+    return num_to_abstract, abstract_levels
+
+def _get_docx_style_numpr(style):
+    """从段落样式中读取继承的 numPr，兼容内建 List Number / List Bullet 样式"""
+    if style is None or not hasattr(style, 'element'):
+        return None, None
+
+    try:
+        num_id_nodes = style.element.xpath('./w:pPr/w:numPr/w:numId')
+        ilvl_nodes = style.element.xpath('./w:pPr/w:numPr/w:ilvl')
+    except Exception:
+        return None, None
+
+    num_id = _docx_attr(num_id_nodes[0], 'val') if num_id_nodes else None
+    ilvl_raw = _docx_attr(ilvl_nodes[0], 'val') if ilvl_nodes else None
+
+    try:
+        ilvl = int(ilvl_raw) if ilvl_raw is not None else 0
+    except (TypeError, ValueError):
+        ilvl = 0
+
+    return (str(num_id), ilvl) if num_id is not None else (None, None)
+
+def _get_docx_paragraph_numpr(para):
+    """获取段落实际使用的 numId / ilvl，优先段落自身，再回退样式"""
+    p = getattr(para, "_p", None)
+    ppr = getattr(p, "pPr", None) if p is not None else None
+    num_pr = getattr(ppr, "numPr", None) if ppr is not None else None
+
+    if num_pr is not None:
+        num_id_el = getattr(num_pr, "numId", None)
+        ilvl_el = getattr(num_pr, "ilvl", None)
+        num_id = getattr(num_id_el, "val", None)
+        ilvl_raw = getattr(ilvl_el, "val", None)
+        try:
+            ilvl = int(ilvl_raw) if ilvl_raw is not None else 0
+        except (TypeError, ValueError):
+            ilvl = 0
+        if num_id is not None:
+            return str(num_id), ilvl
+
+    return _get_docx_style_numpr(getattr(para, "style", None))
+
+def _to_roman(value):
+    if value <= 0:
+        return str(value)
+    pairs = [
+        (1000, "M"), (900, "CM"), (500, "D"), (400, "CD"),
+        (100, "C"), (90, "XC"), (50, "L"), (40, "XL"),
+        (10, "X"), (9, "IX"), (5, "V"), (4, "IV"), (1, "I"),
+    ]
+    result = []
+    remaining = value
+    for number, numeral in pairs:
+        while remaining >= number:
+            result.append(numeral)
+            remaining -= number
+    return ''.join(result)
+
+def _to_alpha(value, uppercase=False):
+    if value <= 0:
+        return str(value)
+    letters = []
+    current = value
+    while current > 0:
+        current -= 1
+        letters.append(chr((current % 26) + (65 if uppercase else 97)))
+        current //= 26
+    return ''.join(reversed(letters))
+
+def _to_chinese_counting(value):
+    if value <= 0:
+        return str(value)
+
+    digits = "零一二三四五六七八九"
+    units = ["", "十", "百", "千"]
+    if value < 10:
+        return digits[value]
+    if value < 10000:
+        parts = []
+        zero_pending = False
+        chars = list(str(value))
+        length = len(chars)
+        for idx, char in enumerate(chars):
+            digit = int(char)
+            unit = units[length - idx - 1]
+            if digit == 0:
+                zero_pending = bool(parts)
+                continue
+            if zero_pending:
+                parts.append("零")
+                zero_pending = False
+            if not (digit == 1 and unit == "十" and not parts):
+                parts.append(digits[digit])
+            parts.append(unit)
+        return ''.join(parts) or digits[0]
+    return str(value)
+
+def _to_circled_number(value):
+    if 1 <= value <= 20:
+        return chr(9311 + value)
+    return str(value)
+
+def _format_docx_number_value(value, num_fmt):
+    """按 Word numFmt 渲染编号文本"""
+    fmt = (num_fmt or '').lower()
+    if fmt in {'decimal', 'decimalfullwidth'}:
+        return str(value)
+    if fmt == 'decimalzero':
+        return f"{value:02d}"
+    if fmt == 'lowerletter':
+        return _to_alpha(value, uppercase=False)
+    if fmt == 'upperletter':
+        return _to_alpha(value, uppercase=True)
+    if fmt == 'lowerroman':
+        return _to_roman(value).lower()
+    if fmt == 'upperroman':
+        return _to_roman(value)
+    if fmt in {'chinesecounting', 'chineselegalsimplified', 'ideographtraditional', 'taiwanesecounting'}:
+        return _to_chinese_counting(value)
+    if fmt in {'decimalenclosedcircle', 'circleNumDbPlain'.lower(), 'decimalenclosedcirclechinese'}:
+        return _to_circled_number(value)
+    return str(value)
+
+def _render_docx_list_marker(numbering_info, numbering_state):
+    """渲染 Word 多级编号列表的 Markdown 前缀"""
+    if not numbering_info:
+        return None
+    if not numbering_info["ordered"]:
+        return "-"
+
+    num_id = numbering_info["num_id"]
+    level = numbering_info["level"]
+    levels = numbering_info["levels"]
+    level_def = levels.get(level, {})
+    state = numbering_state.setdefault(num_id, {})
+
+    for existing_level in list(state.keys()):
+        if existing_level > level:
+            del state[existing_level]
+
+    if level not in state:
+        state[level] = max(level_def.get("start", 1) - 1, 0)
+    state[level] += 1
+
+    for ancestor_level in range(level):
+        if ancestor_level not in state:
+            ancestor_def = levels.get(ancestor_level, {})
+            state[ancestor_level] = max(ancestor_def.get("start", 1), 1)
+
+    template = level_def.get("lvl_text") or f"%{level + 1}."
+
+    def _replace(match):
+        ref_level = int(match.group(1)) - 1
+        ref_value = state.get(ref_level, 1)
+        ref_def = levels.get(ref_level, level_def)
+        return _format_docx_number_value(ref_value, ref_def.get("num_fmt"))
+
+    rendered = re.sub(r"%(\d+)", _replace, template).strip()
+    return rendered or "1."
+
+def _is_docx_toc_paragraph(para):
+    """识别 Word 自动目录段落，避免被误当正文导出"""
+    style = getattr(para, "style", None)
+    style_name = getattr(style, "name", "") if style is not None else ""
+    style_id = getattr(style, "style_id", "") if style is not None else ""
+
+    if re.match(r"(?i)^toc(?:\s+heading|\s+\d+)?$", style_name.strip()):
+        return True
+    if re.match(r"(?i)^toc(?:heading|\d+)?$", style_id.strip()):
+        return True
+
+    try:
+        root = ET.fromstring(para._p.xml)
+    except Exception:
+        return False
+
+    for instr in root.findall('.//w:instrText', DOCX_XML_NAMESPACES):
+        if 'TOC' in (instr.text or '').upper():
+            return True
+    return False
+
 def convert_docx(file_path):
     """转换 Word 文档，支持标题、格式和列表（含编号/层级）"""
     import docx
 
     doc = docx.Document(file_path)
     content = ""
+    num_to_abstract, abstract_levels = _build_docx_numbering_index(doc)
+    numbering_state = {}
 
     def get_numbering_info(para):
         """
@@ -492,47 +731,14 @@ def convert_docx(file_path):
             None 或 {'level': int, 'ordered': bool}
         """
         try:
-            p = getattr(para, "_p", None)
-            ppr = getattr(p, "pPr", None) if p is not None else None
-            num_pr = getattr(ppr, "numPr", None) if ppr is not None else None
-            if num_pr is None:
+            num_id, level = _get_docx_paragraph_numpr(para)
+            if num_id is None:
                 return None
 
-            num_id_el = getattr(num_pr, "numId", None)
-            ilvl_el = getattr(num_pr, "ilvl", None)
-            level = int(ilvl_el.val) if ilvl_el is not None and getattr(ilvl_el, "val", None) is not None else 0
-
-            num_fmt = None
-            num_id = None
-            if num_id_el is not None and getattr(num_id_el, "val", None) is not None:
-                try:
-                    num_id = int(num_id_el.val)
-                except Exception:
-                    num_id = None
-
-            if num_id is not None:
-                try:
-                    numbering = doc.part.numbering_part.element
-                    ns = {'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'}
-                    num_nodes = numbering.xpath(f'.//w:num[@w:numId="{num_id}"]', namespaces=ns)
-                    if num_nodes:
-                        abstract_id_nodes = num_nodes[0].xpath('./w:abstractNumId', namespaces=ns)
-                        if abstract_id_nodes:
-                            abstract_id = abstract_id_nodes[0].get(f'{{{ns["w"]}}}val')
-                            abstract_nodes = numbering.xpath(
-                                f'.//w:abstractNum[@w:abstractNumId="{abstract_id}"]',
-                                namespaces=ns,
-                            )
-                            if abstract_nodes:
-                                lvl_nodes = abstract_nodes[0].xpath(f'./w:lvl[@w:ilvl="{level}"]', namespaces=ns)
-                                if not lvl_nodes:
-                                    lvl_nodes = abstract_nodes[0].xpath('./w:lvl', namespaces=ns)
-                                if lvl_nodes:
-                                    fmt_nodes = lvl_nodes[0].xpath('./w:numFmt', namespaces=ns)
-                                    if fmt_nodes:
-                                        num_fmt = fmt_nodes[0].get(f'{{{ns["w"]}}}val')
-                except Exception:
-                    num_fmt = None
+            abstract_id = num_to_abstract.get(str(num_id))
+            levels = abstract_levels.get(abstract_id, {}) if abstract_id is not None else {}
+            level_def = levels.get(level) or levels.get(0) or {}
+            num_fmt = level_def.get('num_fmt')
 
             style = getattr(para, "style", None)
             style_name = getattr(style, "name", "") if style is not None else ""
@@ -550,12 +756,19 @@ def convert_docx(file_path):
             else:
                 ordered = True
 
-            return {'level': max(level, 0), 'ordered': ordered}
+            return {
+                'level': max(level, 0),
+                'ordered': ordered,
+                'num_id': str(num_id),
+                'levels': levels,
+            }
         except Exception:
             return None
 
     def process_paragraph(para):
         """处理单个段落，识别标题、列表和格式"""
+        if _is_docx_toc_paragraph(para):
+            return ""
         if not para.text.strip():
             return ""
 
@@ -603,7 +816,7 @@ def convert_docx(file_path):
         numbering_info = get_numbering_info(para)
         if numbering_info:
             indent = "    " * numbering_info["level"]
-            marker = "1." if numbering_info["ordered"] else "-"
+            marker = _render_docx_list_marker(numbering_info, numbering_state)
             return f"{indent}{marker} {text_value}\n"
 
         # 注意：python-docx对列表的支持有限，这里做基本处理（按样式兜底）
@@ -984,6 +1197,121 @@ def _split_pdf_words_by_columns(words, page_chars, col_split, gap=5):
 
     return left_words, right_words, spanning_words, left_chars, right_chars, spanning_chars
 
+def _split_markdown_blocks(content):
+    return [block.strip() for block in re.split(r"\n\s*\n", content or "") if block.strip()]
+
+def _parse_pdf_academic_section_block(block):
+    """识别论文常见章节标题，支持标题独占或同段内联写法"""
+    raw = (block or '').strip()
+    plain = re.sub(r"^#{1,6}\s*", "", raw).strip()
+
+    appendix_match = re.match(r"^(appendix|appendices|附录)\s*([A-Za-z0-9一二三四五六七八九十]*)\s*[:：\-]?\s*(.*)$", plain, re.IGNORECASE)
+    if appendix_match:
+        _, suffix, inline_body = appendix_match.groups()
+        heading = "Appendix"
+        if suffix:
+            heading = f"{heading} {suffix.strip()}"
+        return {"section": "appendix", "heading": heading, "inline_body": inline_body.strip()}
+
+    patterns = [
+        ("abstract", "Abstract", [r"abstract", r"摘要"]),
+        ("keywords", "Keywords", [r"keywords?", r"index terms?", r"关键词"]),
+        ("references", "References", [r"references?", r"bibliography", r"参考文献"]),
+    ]
+
+    for section_key, heading, aliases in patterns:
+        alias_pattern = "|".join(f"(?:{alias})" for alias in aliases)
+        match = re.match(rf"^(?:{alias_pattern})\s*[:：]?\s*(.*)$", plain, re.IGNORECASE)
+        if not match:
+            continue
+        inline_body = match.group(1).strip()
+        if inline_body and re.match(r"^[A-Za-z]+$", inline_body) and inline_body.lower() == plain.lower():
+            inline_body = ""
+        return {"section": section_key, "heading": heading, "inline_body": inline_body}
+
+    return None
+
+def _is_markdown_heading_block(block):
+    first_line = (block or '').strip().splitlines()[0] if (block or '').strip() else ''
+    return bool(re.match(r"^#{1,6}\s+\S", first_line))
+
+def _format_pdf_keywords_block(body_blocks):
+    text = " ".join(_normalize_text(block) for block in body_blocks if block.strip())
+    text = re.sub(r"^(?:keywords?|index terms?|关键词)\s*[:：]\s*", "", text, flags=re.IGNORECASE)
+    if not text:
+        return "## Keywords"
+
+    parts = [part.strip() for part in re.split(r"[;,；，、]\s*", text) if part.strip()]
+    if not parts:
+        return "## Keywords"
+    return "## Keywords\n\n" + "\n".join(f"- {part}" for part in parts)
+
+def _format_pdf_references_block(body_blocks):
+    items = []
+    for block in body_blocks:
+        cleaned = _normalize_text(block, preserve_newlines=True)
+        for line in cleaned.splitlines():
+            text = re.sub(r"^(?:\[\d+\]|\d+[.)])\s*", "", line.strip())
+            if text:
+                items.append(text)
+
+    if not items:
+        return "## References"
+    return "## References\n\n" + "\n".join(f"1. {item}" for item in items)
+
+def _format_pdf_academic_section(section_key, heading, body_blocks):
+    if section_key == "keywords":
+        return _format_pdf_keywords_block(body_blocks)
+    if section_key == "references":
+        return _format_pdf_references_block(body_blocks)
+
+    body = "\n\n".join(block.strip() for block in body_blocks if block.strip()).strip()
+    rendered_heading = f"## {heading}"
+    return f"{rendered_heading}\n\n{body}".strip()
+
+def _postprocess_pdf_academic_sections(content):
+    """将论文常见章节归一成固定 Markdown 结构"""
+    blocks = _split_markdown_blocks(content)
+    if not blocks:
+        return content
+
+    result_blocks = []
+    current_section = None
+    current_heading = None
+    current_body = []
+
+    def _flush_current():
+        nonlocal current_section, current_heading, current_body
+        if current_section is None:
+            return
+        result_blocks.append(_format_pdf_academic_section(current_section, current_heading, current_body))
+        current_section = None
+        current_heading = None
+        current_body = []
+
+    for block in blocks:
+        parsed = _parse_pdf_academic_section_block(block)
+        if parsed:
+            _flush_current()
+            current_section = parsed["section"]
+            current_heading = parsed["heading"]
+            current_body = [parsed["inline_body"]] if parsed["inline_body"] else []
+            continue
+
+        if current_section is not None and (_is_markdown_heading_block(block) or re.match(r"^##\s+Page\s+\d+\s*$", block)):
+            _flush_current()
+            result_blocks.append(block)
+            continue
+
+        if current_section is not None:
+            current_body.append(block)
+            continue
+
+        result_blocks.append(block)
+
+    _flush_current()
+    return "\n\n".join(block for block in result_blocks if block.strip()).strip()
+
 
 def _lines_to_markdown_blocks(lines, page_chars, body_size):
     """
@@ -1188,7 +1516,7 @@ def convert_pdf(file_path):
     if not content and page_errors:
         page_numbers = ", ".join(str(page_number) for page_number, _ in page_errors)
         raise ValueError(f"PDF 解析失败，无法提取任何内容。异常页码: {page_numbers}")
-    return content
+    return _postprocess_pdf_academic_sections(content)
 
 def convert_md(file_path, output_dir=None):
     """
