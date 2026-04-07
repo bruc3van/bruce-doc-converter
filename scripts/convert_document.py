@@ -881,8 +881,9 @@ def convert_docx(file_path):
     return content.strip()
 
 def convert_xlsx(file_path):
-    """转换 Excel 文件"""
+    """转换 Excel 文件，支持多表头、空白分隔区、冻结窗格和常见格式保留"""
     import openpyxl
+    from datetime import date, datetime, time
 
     workbook = openpyxl.load_workbook(file_path, data_only=True)
     content = ""
@@ -898,6 +899,271 @@ def convert_xlsx(file_path):
                     merge_map.add((row, col))
         return merge_map
 
+    def _count_number_format_decimals(number_format):
+        fmt = (number_format or "").split(";")[0]
+        fmt = re.sub(r'"[^"]*"', "", fmt)
+        fmt = re.sub(r"\[[^\]]*\]", "", fmt)
+        match = re.search(r"\.([0#]+)", fmt)
+        return len(match.group(1)) if match else 0
+
+    def _format_excel_datetime(value):
+        if isinstance(value, datetime):
+            if value.time() == datetime.min.time():
+                return value.strftime("%Y-%m-%d")
+            return value.strftime("%Y-%m-%d %H:%M:%S")
+        if isinstance(value, date):
+            return value.strftime("%Y-%m-%d")
+        if isinstance(value, time):
+            return value.strftime("%H:%M:%S")
+        return _normalize_text(value)
+
+    def _format_excel_number(value, number_format):
+        decimals = _count_number_format_decimals(number_format)
+        use_grouping = "," in (number_format or "")
+
+        if "%" in (number_format or ""):
+            scaled = value * 100
+            formatted = f"{scaled:,.{decimals}f}" if use_grouping else f"{scaled:.{decimals}f}"
+            return f"{formatted}%"
+
+        if decimals > 0:
+            return f"{value:,.{decimals}f}" if use_grouping else f"{value:.{decimals}f}"
+
+        if isinstance(value, float) and not value.is_integer():
+            text = f"{value:,}" if use_grouping else f"{value}"
+            return text.rstrip("0").rstrip(".")
+
+        integer_value = int(round(value))
+        return f"{integer_value:,}" if use_grouping else str(integer_value)
+
+    def _format_excel_cell(cell, is_merged_placeholder=False):
+        value = cell.value
+        if value is None:
+            return "" if is_merged_placeholder else None
+
+        if cell.is_date or isinstance(value, (datetime, date, time)):
+            return _format_excel_datetime(value)
+
+        if isinstance(value, bool):
+            return "TRUE" if value else "FALSE"
+
+        if isinstance(value, (int, float)):
+            return _format_excel_number(value, cell.number_format or "")
+
+        return _normalize_text(value)
+
+    def _classify_excel_cell(cell, is_merged_placeholder=False):
+        if is_merged_placeholder:
+            return "placeholder"
+        value = cell.value
+        if value is None:
+            return "blank"
+        if cell.is_date or isinstance(value, (datetime, date, time)):
+            return "date"
+        if isinstance(value, bool):
+            return "text"
+        if isinstance(value, (int, float)):
+            return "number"
+        return "text"
+
+    def _iter_table_row_groups(worksheet, merge_map):
+        current_group = []
+        for row in worksheet.iter_rows(values_only=False):
+            cells = []
+            occupied_positions = []
+            display_values = []
+            kinds = []
+
+            for cell in row:
+                coord = (cell.row, cell.column)
+                is_merged_placeholder = coord in merge_map
+                display_value = _format_excel_cell(cell, is_merged_placeholder=is_merged_placeholder)
+                occupied = _table_position_has_content(display_value, occupied=is_merged_placeholder)
+
+                cells.append(cell)
+                display_values.append(display_value)
+                occupied_positions.append(occupied)
+                kinds.append(_classify_excel_cell(cell, is_merged_placeholder=is_merged_placeholder))
+
+            row_record = {
+                "row_index": row[0].row if row else 0,
+                "cells": cells,
+                "values": display_values,
+                "occupied": occupied_positions,
+                "kinds": kinds,
+            }
+
+            if any(occupied_positions):
+                current_group.append(row_record)
+            elif current_group:
+                yield current_group
+                current_group = []
+
+        if current_group:
+            yield current_group
+
+    def _split_column_segments(row_group):
+        width = max((len(row["occupied"]) for row in row_group), default=0)
+        active_columns = [any(idx < len(row["occupied"]) and row["occupied"][idx] for row in row_group) for idx in range(width)]
+        segments = []
+        start = None
+
+        for idx, is_active in enumerate(active_columns):
+            if is_active and start is None:
+                start = idx
+            elif not is_active and start is not None:
+                segments.append((start, idx))
+                start = None
+
+        if start is not None:
+            segments.append((start, width))
+        return segments
+
+    def _slice_table_rows(row_group, col_start, col_end):
+        sliced_rows = []
+        for row in row_group:
+            values = row["values"][col_start:col_end]
+            occupied = row["occupied"][col_start:col_end]
+            kinds = row["kinds"][col_start:col_end]
+            if not any(occupied):
+                continue
+            sliced_rows.append({
+                "row_index": row["row_index"],
+                "values": values,
+                "occupied": occupied,
+                "kinds": kinds,
+            })
+        return sliced_rows
+
+    def _profile_table_row(row_data):
+        text_count = 0
+        number_count = 0
+        date_count = 0
+        placeholder_count = 0
+        non_empty_count = 0
+
+        for value, occupied, kind in zip(row_data["values"], row_data["occupied"], row_data["kinds"]):
+            if not occupied:
+                continue
+            if kind == "placeholder":
+                placeholder_count += 1
+                continue
+            if value not in (None, ""):
+                non_empty_count += 1
+            if kind == "text":
+                text_count += 1
+            elif kind == "number":
+                number_count += 1
+            elif kind == "date":
+                date_count += 1
+
+        return {
+            "text_count": text_count,
+            "number_count": number_count,
+            "date_count": date_count,
+            "placeholder_count": placeholder_count,
+            "non_empty_count": non_empty_count,
+            "looks_header": non_empty_count > 0 and text_count >= (number_count + date_count),
+            "looks_data": (number_count + date_count) > text_count,
+        }
+
+    def _get_freeze_header_rows(worksheet):
+        freeze_panes = worksheet.freeze_panes
+        if not freeze_panes:
+            return 0
+        if hasattr(freeze_panes, "row"):
+            return max(int(freeze_panes.row) - 1, 0)
+        match = re.match(r"[A-Za-z]+(\d+)", str(freeze_panes))
+        if not match:
+            return 0
+        return max(int(match.group(1)) - 1, 0)
+
+    def _determine_header_row_count(table_rows, freeze_header_rows):
+        if not table_rows:
+            return 0
+
+        frozen_header_count = 0
+        if freeze_header_rows > 0:
+            for row in table_rows:
+                if row["row_index"] <= freeze_header_rows:
+                    frozen_header_count += 1
+                else:
+                    break
+            if frozen_header_count > 0:
+                return min(frozen_header_count, len(table_rows))
+
+        first_profile = _profile_table_row(table_rows[0])
+        if not first_profile["looks_header"]:
+            return 0
+
+        header_count = 1
+        if len(table_rows) >= 3:
+            second_profile = _profile_table_row(table_rows[1])
+            third_profile = _profile_table_row(table_rows[2])
+            if first_profile["placeholder_count"] > 0 and second_profile["looks_header"] and third_profile["looks_data"]:
+                header_count = 2
+
+        return min(header_count, len(table_rows))
+
+    def _build_header_labels(header_rows, col_count):
+        if not header_rows:
+            return [f"Column {idx + 1}" for idx in range(col_count)]
+
+        expanded_rows = []
+        for row in header_rows:
+            carry_text = ""
+            expanded = []
+            for value, occupied in zip(row["values"], row["occupied"]):
+                text = _normalize_text(value)
+                if text:
+                    carry_text = text
+                    expanded.append(text)
+                elif len(header_rows) > 1 and occupied and carry_text:
+                    expanded.append(carry_text)
+                else:
+                    expanded.append("")
+            expanded_rows.append(expanded)
+
+        headers = []
+        for col_idx in range(col_count):
+            parts = []
+            for row in expanded_rows:
+                if col_idx >= len(row):
+                    continue
+                part = row[col_idx].strip()
+                if part and (not parts or parts[-1] != part):
+                    parts.append(part)
+            headers.append(" / ".join(parts) if parts else "")
+        return headers
+
+    def _render_table_block(table_rows, freeze_header_rows):
+        col_count = max((len(row["values"]) for row in table_rows), default=0)
+        if col_count == 0:
+            return ""
+
+        header_count = _determine_header_row_count(table_rows, freeze_header_rows)
+        header_rows = table_rows[:header_count]
+        headers = _build_header_labels(header_rows, col_count)
+        data_rows = table_rows[header_count:] if header_count > 0 else table_rows
+
+        lines = [
+            "| " + " | ".join(_normalize_table_cell(header) for header in headers) + " |",
+            "| " + " | ".join(["---"] * col_count) + " |",
+        ]
+
+        for row in data_rows:
+            row_values = []
+            for idx in range(col_count):
+                value = row["values"][idx] if idx < len(row["values"]) else ""
+                occupied = row["occupied"][idx] if idx < len(row["occupied"]) else False
+                if _table_position_has_content(value, occupied):
+                    row_values.append(_normalize_table_cell(value))
+                else:
+                    row_values.append("")
+            lines.append("| " + " | ".join(row_values) + " |")
+
+        return "\n".join(lines)
+
     try:
         for sheet_name in workbook.sheetnames:
             if len(workbook.sheetnames) > 1:
@@ -905,65 +1171,39 @@ def convert_xlsx(file_path):
 
             worksheet = workbook[sheet_name]
             merge_map = _build_merge_map(worksheet)
-            rows = list(worksheet.iter_rows(values_only=False))
+            freeze_header_rows = _get_freeze_header_rows(worksheet)
+            table_blocks = []
 
-            if rows:
-                # 过滤空行（合并单元格的值也要参与判断）
-                non_empty_rows = []
-                for row in rows:
-                    values = []
-                    occupied_positions = []
-                    for cell in row:
-                        coord = (cell.row, cell.column)
-                        is_merged_placeholder = coord in merge_map
-                        val = cell.value
-                        if val is None and is_merged_placeholder:
-                            val = ""
-                        values.append(val)
-                        occupied_positions.append(_table_position_has_content(val, occupied=is_merged_placeholder))
-                    if any(occupied_positions):
-                        non_empty_rows.append((row, values, occupied_positions))
-
-                if non_empty_rows:
-                    def last_non_empty_col_count(values, occupied_positions):
-                        for idx in range(len(values) - 1, -1, -1):
-                            if _table_position_has_content(values[idx], occupied_positions[idx]):
-                                return idx + 1
-                        return 0
-
-                    max_cols = max(last_non_empty_col_count(values, occupied_positions) for _, values, occupied_positions in non_empty_rows)
-
-                    if max_cols == 0:
+            for row_group in _iter_table_row_groups(worksheet, merge_map):
+                for col_start, col_end in _split_column_segments(row_group):
+                    table_rows = _slice_table_rows(row_group, col_start, col_end)
+                    if not table_rows:
                         continue
+                    table_markdown = _render_table_block(table_rows, freeze_header_rows)
+                    if table_markdown:
+                        table_blocks.append(table_markdown)
 
-                    for i, (_, values, occupied_positions) in enumerate(non_empty_rows):
-                        row_data = []
-                        for j in range(max_cols):
-                            if j < len(values) and _table_position_has_content(values[j], occupied_positions[j]):
-                                row_data.append(_normalize_table_cell(values[j]))
-                            else:
-                                row_data.append("")
-
-                        if i == 0:  # 表头
-                            content += "| " + " | ".join(row_data) + " |\n"
-                            content += "| " + " | ".join(["---"] * len(row_data)) + " |\n"
-                        else:
-                            content += "| " + " | ".join(row_data) + " |\n"
-                    content += "\n"
+            if len(table_blocks) == 1:
+                content += table_blocks[0] + "\n\n"
+            elif len(table_blocks) > 1:
+                for idx, table_markdown in enumerate(table_blocks, 1):
+                    content += f"### Table {idx}\n\n{table_markdown}\n\n"
     finally:
         workbook.close()
 
     return content.strip()
 
 def convert_pptx(file_path):
-    """转换 PowerPoint 文件，提取标题、列表、格式、表格和备注"""
+    """转换 PowerPoint 文件，提取标题、正文、表格、图表、图片说明和备注"""
     import pptx
-    from pptx.enum.shapes import MSO_SHAPE_TYPE
+    from pptx.enum.shapes import MSO_SHAPE_TYPE, PP_PLACEHOLDER
 
     presentation = pptx.Presentation(file_path)
     content = ""
+    slide_width = presentation.slide_width
+    slide_height = presentation.slide_height
 
-    def _process_text_frame(text_frame, is_title=False):
+    def _process_text_frame(text_frame, role="body"):
         """处理文本框，保留段落层级和格式"""
         result = ""
         for para in text_frame.paragraphs:
@@ -985,9 +1225,15 @@ def convert_pptx(file_path):
             for (bold, italic), text in groups:
                 formatted += _format_inline_markdown(text, bold=bold, italic=italic)
             text_value = _normalize_text(formatted.strip() or para.text.strip())
+            if not text_value:
+                continue
 
-            if is_title:
+            if role == "title":
                 result += f"### {text_value}\n\n"
+                continue
+
+            if role == "subtitle":
+                result += _escape_plain_markdown_text(text_value) + "\n\n"
                 continue
 
             # 检查列表层级
@@ -1017,58 +1263,312 @@ def convert_pptx(file_path):
             return False
 
         try:
-            return shape.placeholder_format.idx in (0, 1)
+            placeholder_type = shape.placeholder_format.type
+            return placeholder_type in (PP_PLACEHOLDER.TITLE, PP_PLACEHOLDER.CENTER_TITLE)
         except Exception:
             return False
 
-    for i, slide in enumerate(presentation.slides, 1):
-        if len(presentation.slides) > 1:
-            content += f"## Slide {i}\n\n"
+    def _get_placeholder_type(shape):
+        if not getattr(shape, "is_placeholder", False):
+            return None
+        try:
+            return shape.placeholder_format.type
+        except Exception:
+            return None
 
-        # 按占位符类型分类处理
-        for shape in _iter_shapes(slide.shapes):
-            # 处理表格
-            if shape.has_table:
-                table = shape.table
-                all_rows_data = []
-                for row in table.rows:
-                    row_data = []
-                    seen_cells = set()
-                    for cell in row.cells:
-                        cell_id = id(cell)
-                        if cell_id in seen_cells:
-                            continue
-                        seen_cells.add(cell_id)
-                        # 去重合并单元格：跳过非左上角的水平合并续格
-                        if hasattr(cell, 'is_merge_origin'):
-                            if cell.is_merge_origin:
-                                row_data.append(_normalize_table_cell(cell.text))
-                            else:
-                                row_data.append(_normalize_table_cell(cell.text))
-                        else:
-                            row_data.append(_normalize_table_cell(cell.text))
-                    all_rows_data.append(row_data)
-                max_cols = max((len(r) for r in all_rows_data), default=0)
-                if max_cols == 0:
+    def _shape_bounds(shape):
+        left = getattr(shape, "left", 0)
+        top = getattr(shape, "top", 0)
+        width = getattr(shape, "width", 0)
+        height = getattr(shape, "height", 0)
+        return {
+            "left": left,
+            "top": top,
+            "width": width,
+            "height": height,
+            "right": left + width,
+            "bottom": top + height,
+            "center_x": left + width / 2,
+        }
+
+    def _shape_sort_key(entry):
+        return (entry["top"], entry["left"], entry["height"], entry["width"])
+
+    def _render_table_markdown(table):
+        all_rows_data = []
+        for row in table.rows:
+            row_data = []
+            seen_cells = set()
+            for cell in row.cells:
+                cell_id = id(cell)
+                if cell_id in seen_cells:
                     continue
-                for idx, row_data in enumerate(all_rows_data):
-                    padded = row_data + [""] * (max_cols - len(row_data))
-                    content += "| " + " | ".join(padded) + " |\n"
-                    if idx == 0:
-                        content += "| " + " | ".join(["---"] * max_cols) + " |\n"
-                content += "\n"
+                seen_cells.add(cell_id)
+                row_data.append(_normalize_table_cell(cell.text))
+            all_rows_data.append(row_data)
+
+        max_cols = max((len(r) for r in all_rows_data), default=0)
+        if max_cols == 0:
+            return ""
+
+        content_part = ""
+        for idx, row_data in enumerate(all_rows_data):
+            padded = row_data + [""] * (max_cols - len(row_data))
+            content_part += "| " + " | ".join(padded) + " |\n"
+            if idx == 0:
+                content_part += "| " + " | ".join(["---"] * max_cols) + " |\n"
+        return content_part.strip()
+
+    def _render_chart_markdown(chart):
+        lines = []
+        chart_title = ""
+        if getattr(chart, "has_title", False):
+            try:
+                chart_title = _normalize_text(chart.chart_title.text_frame.text)
+            except Exception:
+                chart_title = ""
+        lines.append(f"**Chart:** {chart_title or 'Untitled chart'}")
+
+        series_names = []
+        try:
+            series_names = [_normalize_text(series.name) for series in chart.series if _normalize_text(series.name)]
+        except Exception:
+            series_names = []
+        if series_names:
+            lines.append(f"Series: {', '.join(series_names)}")
+
+        categories = []
+        try:
+            categories = [_normalize_text(str(category)) for category in chart.plots[0].categories if _normalize_text(str(category))]
+        except Exception:
+            categories = []
+        if categories:
+            lines.append(f"Categories: {', '.join(categories)}")
+
+        return "\n".join(lines).strip()
+
+    def _render_picture_markdown(caption_text=None):
+        if caption_text:
+            return f"**Image**\nCaption: {caption_text}"
+        return "**Image**"
+
+    def _render_diagram_markdown(shape):
+        text_value = ""
+        if getattr(shape, "has_text_frame", False) and getattr(shape, "text", "").strip():
+            text_value = _normalize_text(shape.text)
+        shape_name = _normalize_text(getattr(shape, "name", "SmartArt"))
+        if text_value:
+            return f"**SmartArt:** {shape_name}\n{text_value}"
+        return f"**SmartArt:** {shape_name}"
+
+    def _looks_like_title_candidate(entry):
+        return (
+            entry["kind"] == "text"
+            and entry["top"] <= slide_height * 0.22
+            and entry["width"] >= slide_width * 0.35
+            and len(entry.get("raw_text", "")) <= 120
+        )
+
+    def _looks_like_subtitle_candidate(entry, title_entry):
+        return (
+            entry["kind"] == "text"
+            and entry["top"] >= title_entry["bottom"]
+            and entry["top"] <= title_entry["bottom"] + slide_height * 0.18
+            and entry["width"] >= slide_width * 0.25
+            and entry["center_x"] >= slide_width * 0.25
+            and entry["center_x"] <= slide_width * 0.75
+        )
+
+    def _is_footer_candidate(entry):
+        return (
+            entry["kind"] == "text"
+            and entry["bottom"] >= slide_height * 0.86
+            and entry["height"] <= slide_height * 0.12
+        )
+
+    def _find_picture_caption(entries, picture_entry):
+        best_entry = None
+        best_distance = None
+        for entry in entries:
+            if entry["kind"] != "text" or entry.get("role") != "body" or entry.get("consumed"):
                 continue
 
-            # 处理文本框
-            if shape.has_text_frame and shape.text.strip():
-                content += _process_text_frame(shape.text_frame, is_title=_shape_is_title(shape))
+            horizontal_overlap = min(entry["right"], picture_entry["right"]) - max(entry["left"], picture_entry["left"])
+            if horizontal_overlap <= 0:
+                continue
 
-        # 提取备注
+            distance = entry["top"] - picture_entry["bottom"]
+            if distance < 0 or distance > slide_height * 0.08:
+                continue
+            if len(entry.get("raw_text", "")) > 160:
+                continue
+
+            if best_distance is None or distance < best_distance:
+                best_distance = distance
+                best_entry = entry
+        return best_entry
+
+    def _render_body_entries(entries):
+        usable_entries = [entry for entry in entries if entry.get("markdown")]
+        if not usable_entries:
+            return ""
+
+        left_entries = []
+        right_entries = []
+        wide_entries = []
+
+        for entry in usable_entries:
+            if entry["right"] <= slide_width * 0.48:
+                left_entries.append(entry)
+            elif entry["left"] >= slide_width * 0.52:
+                right_entries.append(entry)
+            else:
+                wide_entries.append(entry)
+
+        parts = []
+        parts.extend(entry["markdown"] for entry in sorted(wide_entries, key=_shape_sort_key))
+
+        if left_entries and right_entries:
+            parts.append("#### Left Column")
+            parts.extend(entry["markdown"] for entry in sorted(left_entries, key=_shape_sort_key))
+            parts.append("#### Right Column")
+            parts.extend(entry["markdown"] for entry in sorted(right_entries, key=_shape_sort_key))
+            return "\n\n".join(part.strip() for part in parts if part and part.strip()).strip()
+
+        ordered_entries = sorted(usable_entries, key=_shape_sort_key)
+        return "\n\n".join(entry["markdown"].strip() for entry in ordered_entries if entry["markdown"].strip()).strip()
+
+    for i, slide in enumerate(presentation.slides, 1):
+        slide_parts = []
+        if len(presentation.slides) > 1:
+            slide_parts.append(f"## Slide {i}")
+
+        entries = []
+
+        for shape in _iter_shapes(slide.shapes):
+            bounds = _shape_bounds(shape)
+            placeholder_type = _get_placeholder_type(shape)
+            entry = {
+                "shape": shape,
+                "kind": None,
+                "role": "body",
+                "markdown": "",
+                "raw_text": "",
+                "placeholder_type": placeholder_type,
+                **bounds,
+            }
+
+            if getattr(shape, "has_table", False):
+                entry["kind"] = "table"
+                entry["markdown"] = _render_table_markdown(shape.table)
+            elif getattr(shape, "has_chart", False):
+                entry["kind"] = "chart"
+                entry["markdown"] = _render_chart_markdown(shape.chart)
+            elif getattr(shape, "shape_type", None) == MSO_SHAPE_TYPE.PICTURE:
+                entry["kind"] = "picture"
+            elif getattr(shape, "shape_type", None) == MSO_SHAPE_TYPE.DIAGRAM:
+                entry["kind"] = "diagram"
+                entry["markdown"] = _render_diagram_markdown(shape)
+            elif getattr(shape, "has_text_frame", False) and getattr(shape, "text", "").strip():
+                entry["kind"] = "text"
+                entry["raw_text"] = _normalize_text(shape.text, preserve_newlines=True)
+                if _shape_is_title(shape):
+                    entry["role"] = "title"
+                elif placeholder_type == PP_PLACEHOLDER.SUBTITLE:
+                    entry["role"] = "subtitle"
+                elif placeholder_type in (PP_PLACEHOLDER.FOOTER, PP_PLACEHOLDER.DATE, PP_PLACEHOLDER.SLIDE_NUMBER):
+                    entry["role"] = "footer"
+                entry["markdown"] = _process_text_frame(shape.text_frame, role="title" if entry["role"] == "title" else "body")
+            else:
+                continue
+
+            if entry["markdown"] or entry["kind"] in {"picture"}:
+                entries.append(entry)
+
+        entries.sort(key=_shape_sort_key)
+
+        title_entries = [entry for entry in entries if entry["role"] == "title"]
+        subtitle_entries = [entry for entry in entries if entry["role"] == "subtitle"]
+
+        if not title_entries:
+            for entry in entries:
+                if _looks_like_title_candidate(entry):
+                    entry["role"] = "title"
+                    entry["markdown"] = _process_text_frame(entry["shape"].text_frame, role="title")
+                    title_entries.append(entry)
+                    break
+
+        if title_entries and not subtitle_entries:
+            title_anchor = sorted(title_entries, key=_shape_sort_key)[0]
+            for entry in entries:
+                if entry["role"] == "body" and _looks_like_subtitle_candidate(entry, title_anchor):
+                    entry["role"] = "subtitle"
+                    subtitle_entries.append(entry)
+                    break
+
+        for entry in entries:
+            if entry["role"] == "body" and _is_footer_candidate(entry):
+                entry["role"] = "footer"
+
+        for entry in [entry for entry in entries if entry["kind"] == "picture"]:
+            caption_entry = _find_picture_caption(entries, entry)
+            if caption_entry is not None:
+                caption_entry["consumed"] = True
+                entry["markdown"] = _render_picture_markdown(caption_entry["raw_text"])
+            else:
+                entry["markdown"] = _render_picture_markdown()
+
+        title_entries = sorted([entry for entry in entries if entry["role"] == "title"], key=_shape_sort_key)
+        subtitle_entries = sorted([entry for entry in entries if entry["role"] == "subtitle"], key=_shape_sort_key)
+        footer_entries = sorted([entry for entry in entries if entry["role"] == "footer"], key=_shape_sort_key)
+        body_entries = [
+            entry for entry in entries
+            if entry["role"] == "body" and not entry.get("consumed") and entry["kind"] in {"text", "table"}
+        ]
+        visual_entries = [
+            entry for entry in entries
+            if entry["kind"] in {"chart", "picture", "diagram"} and entry.get("markdown")
+        ]
+
+        for entry in title_entries:
+            if entry["markdown"].strip():
+                slide_parts.append(entry["markdown"].strip())
+
+        if subtitle_entries:
+            subtitle_body = "\n\n".join(
+                _process_text_frame(entry["shape"].text_frame, role="subtitle").strip()
+                for entry in subtitle_entries
+                if _process_text_frame(entry["shape"].text_frame, role="subtitle").strip()
+            ).strip()
+            if subtitle_body:
+                slide_parts.append("#### Subtitle\n\n" + subtitle_body)
+
+        body_markdown = _render_body_entries(body_entries)
+        if body_markdown:
+            slide_parts.append(body_markdown)
+
+        if visual_entries:
+            visuals_body = "\n\n".join(entry["markdown"].strip() for entry in sorted(visual_entries, key=_shape_sort_key) if entry["markdown"].strip())
+            if visuals_body:
+                slide_parts.append("#### Visuals\n\n" + visuals_body)
+
+        if footer_entries:
+            footer_body = "\n\n".join(
+                _process_text_frame(entry["shape"].text_frame, role="subtitle").strip()
+                for entry in footer_entries
+                if _process_text_frame(entry["shape"].text_frame, role="subtitle").strip()
+            ).strip()
+            if footer_body:
+                slide_parts.append("#### Footer\n\n" + footer_body)
+
         if slide.has_notes_slide and slide.notes_slide.notes_text_frame:
             notes_text = _normalize_text(slide.notes_slide.notes_text_frame.text, preserve_newlines=True)
             if notes_text:
-                quoted_lines = "\n".join(f"> {line}" for line in notes_text.splitlines())
-                content += f"\n> **备注**:\n{quoted_lines}\n\n"
+                slide_parts.append(f"### Notes\n\n{notes_text}")
+
+        slide_content = "\n\n".join(part.strip() for part in slide_parts if part and part.strip()).strip()
+        if slide_content:
+            content += slide_content
 
         if i < len(presentation.slides):
             content += "---\n\n"

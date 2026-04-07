@@ -1,11 +1,15 @@
+import base64
 import tempfile
 import unittest
+from datetime import date
 from pathlib import Path
 from unittest.mock import patch
 
 import openpyxl
 from docx import Document
 from docx.enum.style import WD_STYLE_TYPE
+from pptx.chart.data import CategoryChartData
+from pptx.enum.chart import XL_CHART_TYPE
 from pptx import Presentation
 from pptx.util import Inches
 
@@ -89,6 +93,51 @@ class ConvertDocumentTests(unittest.TestCase):
             self.assertIn("| Merged |  |  |", result["markdown_content"])
             self.assertNotIn("| Merged | Merged | Merged |", result["markdown_content"])
 
+    def test_convert_xlsx_supports_multi_headers_freeze_panes_and_multiple_tables(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            xlsx_path = tmp_path / "report.xlsx"
+            output_dir = tmp_path / "out"
+
+            workbook = openpyxl.Workbook()
+            worksheet = workbook.active
+            worksheet.freeze_panes = "A3"
+
+            worksheet["A1"] = "Region"
+            worksheet["B1"] = "Metrics"
+            worksheet.merge_cells("B1:D1")
+            worksheet["A2"] = "Name"
+            worksheet["B2"] = "Date"
+            worksheet["C2"] = "Rate"
+            worksheet["D2"] = "Amount"
+            worksheet["A3"] = "East"
+            worksheet["B3"] = date(2024, 1, 2)
+            worksheet["B3"].number_format = "yyyy-mm-dd"
+            worksheet["C3"] = 0.125
+            worksheet["C3"].number_format = "0.0%"
+            worksheet["D3"] = 12345.6
+            worksheet["D3"].number_format = "#,##0.00"
+
+            worksheet["A6"] = 100
+            worksheet["B6"] = 200
+            worksheet["A7"] = 300
+            worksheet["B7"] = 400
+
+            workbook.save(xlsx_path)
+            workbook.close()
+
+            result = convert_document(str(xlsx_path), output_dir=str(output_dir))
+
+            self.assertTrue(result["success"], result)
+            markdown = result["markdown_content"]
+            self.assertIn("### Table 1", markdown)
+            self.assertIn("| Region / Name | Metrics / Date | Metrics / Rate | Metrics / Amount |", markdown)
+            self.assertIn("| East | 2024-01-02 | 12.5% | 12,345.60 |", markdown)
+            self.assertIn("### Table 2", markdown)
+            self.assertIn("| Column 1 | Column 2 |", markdown)
+            self.assertIn("| 100 | 200 |", markdown)
+            self.assertIn("| 300 | 400 |", markdown)
+
     def test_convert_docx_vertical_merge_continuation_renders_blank_cell(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp_path = Path(tmp_dir)
@@ -130,6 +179,108 @@ class ConvertDocumentTests(unittest.TestCase):
             self.assertTrue(result["success"], result)
             self.assertIn("普通文本框", result["markdown_content"])
             self.assertTrue(Path(result["output_path"]).exists())
+
+    def test_convert_pptx_sorts_visual_order_and_splits_columns(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            pptx_path = tmp_path / "columns.pptx"
+            output_dir = tmp_path / "out"
+
+            presentation = Presentation()
+            slide = presentation.slides.add_slide(presentation.slide_layouts[6])
+
+            right = slide.shapes.add_textbox(Inches(5.6), Inches(2.0), Inches(2.0), Inches(0.8))
+            right.text_frame.text = "右侧内容"
+
+            footer = slide.shapes.add_textbox(Inches(0.5), Inches(6.8), Inches(2.0), Inches(0.4))
+            footer.text_frame.text = "页脚"
+
+            title = slide.shapes.add_textbox(Inches(0.5), Inches(0.2), Inches(6.0), Inches(0.6))
+            title.text_frame.text = "课程标题"
+
+            left = slide.shapes.add_textbox(Inches(0.5), Inches(2.0), Inches(2.0), Inches(0.8))
+            left.text_frame.text = "左侧内容"
+
+            presentation.save(pptx_path)
+
+            result = convert_document(str(pptx_path), output_dir=str(output_dir))
+
+            self.assertTrue(result["success"], result)
+            markdown = result["markdown_content"]
+            self.assertLess(markdown.index("### 课程标题"), markdown.index("#### Left Column"))
+            self.assertIn("#### Left Column", markdown)
+            self.assertIn("左侧内容", markdown)
+            self.assertIn("#### Right Column", markdown)
+            self.assertIn("右侧内容", markdown)
+            self.assertIn("#### Footer", markdown)
+            self.assertIn("页脚", markdown)
+
+    def test_convert_pptx_extracts_chart_subtitle_and_notes(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            pptx_path = tmp_path / "chart-notes.pptx"
+            output_dir = tmp_path / "out"
+
+            presentation = Presentation()
+            slide = presentation.slides.add_slide(presentation.slide_layouts[1])
+            slide.shapes.title.text = "季度回顾"
+            slide.placeholders[1].text = "销售趋势"
+
+            chart_data = CategoryChartData()
+            chart_data.categories = ["Q1", "Q2"]
+            chart_data.add_series("Sales", (12, 18))
+            chart = slide.shapes.add_chart(
+                XL_CHART_TYPE.COLUMN_CLUSTERED,
+                Inches(1),
+                Inches(2),
+                Inches(5.5),
+                Inches(3),
+                chart_data,
+            ).chart
+            chart.has_title = True
+            chart.chart_title.text_frame.text = "Revenue"
+            slide.notes_slide.notes_text_frame.text = "讲解增长原因\n补充口径说明"
+            presentation.save(pptx_path)
+
+            result = convert_document(str(pptx_path), output_dir=str(output_dir))
+
+            self.assertTrue(result["success"], result)
+            markdown = result["markdown_content"]
+            self.assertIn("### 季度回顾", markdown)
+            self.assertIn("#### Subtitle", markdown)
+            self.assertIn("销售趋势", markdown)
+            self.assertIn("#### Visuals", markdown)
+            self.assertIn("**Chart:** Revenue", markdown)
+            self.assertIn("Series: Sales", markdown)
+            self.assertIn("Categories: Q1, Q2", markdown)
+            self.assertIn("### Notes", markdown)
+            self.assertIn("讲解增长原因", markdown)
+
+    def test_convert_pptx_groups_picture_caption(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            pptx_path = tmp_path / "picture-caption.pptx"
+            output_dir = tmp_path / "out"
+            image_path = tmp_path / "pixel.png"
+
+            image_path.write_bytes(base64.b64decode(
+                "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jxM0AAAAASUVORK5CYII="
+            ))
+
+            presentation = Presentation()
+            slide = presentation.slides.add_slide(presentation.slide_layouts[6])
+            slide.shapes.add_picture(str(image_path), Inches(1), Inches(1.5), Inches(2), Inches(2))
+            caption = slide.shapes.add_textbox(Inches(1), Inches(3.65), Inches(2.8), Inches(0.5))
+            caption.text_frame.text = "这是图片说明"
+            presentation.save(pptx_path)
+
+            result = convert_document(str(pptx_path), output_dir=str(output_dir))
+
+            self.assertTrue(result["success"], result)
+            markdown = result["markdown_content"]
+            self.assertIn("#### Visuals", markdown)
+            self.assertIn("**Image**", markdown)
+            self.assertIn("Caption: 这是图片说明", markdown)
 
     def test_convert_docx_escapes_plain_markdown_syntax(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
