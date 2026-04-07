@@ -3,14 +3,61 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import openpyxl
 from docx import Document
 from pptx import Presentation
 from pptx.util import Inches
 
-from scripts.convert_document import batch_convert, convert_document
+from scripts.convert_document import _extract_pdf_page_blocks, batch_convert, convert_document
 
 
 class ConvertDocumentTests(unittest.TestCase):
+    def test_convert_xlsx_keeps_merged_cells_as_single_value(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            xlsx_path = tmp_path / "merged.xlsx"
+            output_dir = tmp_path / "out"
+
+            workbook = openpyxl.Workbook()
+            worksheet = workbook.active
+            worksheet["A1"] = "Merged"
+            worksheet.merge_cells("A1:C1")
+            worksheet["A2"] = "v1"
+            worksheet["B2"] = "v2"
+            worksheet["C2"] = "v3"
+            workbook.save(xlsx_path)
+            workbook.close()
+
+            result = convert_document(str(xlsx_path), output_dir=str(output_dir))
+
+            self.assertTrue(result["success"], result)
+            self.assertIn("| Merged |  |  |", result["markdown_content"])
+            self.assertNotIn("| Merged | Merged | Merged |", result["markdown_content"])
+
+    def test_convert_docx_vertical_merge_continuation_renders_blank_cell(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            docx_path = tmp_path / "vertical-merge.docx"
+            output_dir = tmp_path / "out"
+
+            document = Document()
+            table = document.add_table(rows=3, cols=2)
+            table.cell(0, 0).text = "Top"
+            table.cell(1, 0).text = "Below"
+            table.cell(0, 0).merge(table.cell(1, 0))
+            table.cell(0, 1).text = "A"
+            table.cell(1, 1).text = "B"
+            table.cell(2, 0).text = "C"
+            table.cell(2, 1).text = "D"
+            document.save(docx_path)
+
+            result = convert_document(str(docx_path), output_dir=str(output_dir))
+
+            self.assertTrue(result["success"], result)
+            self.assertIn("| Top Below | A |", result["markdown_content"])
+            self.assertIn("|  | B |", result["markdown_content"])
+            self.assertEqual(1, result["markdown_content"].count("| Top Below |"))
+
     def test_convert_pptx_allows_non_placeholder_textbox(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp_path = Path(tmp_dir)
@@ -79,6 +126,37 @@ class ConvertDocumentTests(unittest.TestCase):
 
             self.assertEqual(["source.docx"], seen)
             self.assertEqual(1, len(results))
+
+    def test_extract_pdf_page_blocks_keeps_spanning_words_in_two_column_mode(self):
+        words = [
+            {"text": "FULLWIDTH", "x0": 10, "x1": 90, "top": 5, "bottom": 10, "upright": 1},
+        ]
+        for i in range(20):
+            top = 20 + i * 5
+            words.append({"text": f"L{i}", "x0": 5, "x1": 20, "top": top, "bottom": top + 4, "upright": 1})
+            words.append({"text": f"R{i}", "x0": 80, "x1": 95, "top": top, "bottom": top + 4, "upright": 1})
+
+        class FakePage:
+            width = 100
+            height = 200
+            chars = []
+
+            def __init__(self, page_words):
+                self._words = page_words
+
+            def filter(self, _predicate):
+                return self
+
+            def extract_words(self, **_kwargs):
+                return list(self._words)
+
+            def extract_text(self):
+                return ""
+
+        blocks = _extract_pdf_page_blocks(FakePage(words), tables=[])
+        rendered = "".join(content for _, content in blocks)
+
+        self.assertIn("FULLWIDTH", rendered)
 
 
 if __name__ == "__main__":

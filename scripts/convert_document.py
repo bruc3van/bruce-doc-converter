@@ -21,12 +21,14 @@ import re
 import subprocess
 import shutil
 import io
+import xml.etree.ElementTree as ET
 
 SUPPORTED_EXTENSIONS = ['.docx', '.xlsx', '.pptx', '.pdf', '.md']
 MAX_FILE_SIZE_BYTES = 100 * 1024 * 1024
 NODE_CONVERT_TIMEOUT_SECONDS = 120
 NODE_SHARED_HOME_ENV = "BRUCE_DOC_CONVERTER_NODE_HOME"
 GENERATED_OUTPUT_DIR_NAMES = {"Markdown", "Word"}
+DOCX_XML_NAMESPACES = {'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'}
 
 def _configure_windows_stdio():
     """
@@ -429,6 +431,52 @@ def _normalize_table_cell(value):
     text = text.replace("|", "\\|")
     return text
 
+def _table_position_has_content(value, occupied=False):
+    """判断表格位置是否应保留，用于保留合并单元格占位"""
+    return occupied or (value is not None and str(value).strip() != "")
+
+def _get_docx_grid_span(tc):
+    """读取 Word 表格单元格的横向跨列数"""
+    tc_pr = getattr(tc, "tcPr", None)
+    grid_span = getattr(tc_pr, "gridSpan", None) if tc_pr is not None else None
+    raw_value = getattr(grid_span, "val", None) if grid_span is not None else None
+    try:
+        return max(int(raw_value), 1)
+    except (TypeError, ValueError):
+        return 1
+
+def _is_docx_vertical_merge_continuation(tc):
+    """判断 Word 表格单元格是否为纵向合并的续格"""
+    tc_pr = getattr(tc, "tcPr", None)
+    if tc_pr is None:
+        return False
+
+    v_merge = getattr(tc_pr, "vMerge", None)
+    if v_merge is None:
+        return False
+
+    return getattr(v_merge, "val", None) != "restart"
+
+def _extract_docx_table_cell_text(tc):
+    """从 Word 表格 XML 单元格中提取文本，保留段落换行"""
+    paragraphs = []
+    try:
+        root = ET.fromstring(tc.xml)
+    except ET.ParseError:
+        return ""
+
+    for paragraph in root.findall('./w:p', DOCX_XML_NAMESPACES):
+        text_nodes = paragraph.findall('.//w:t', DOCX_XML_NAMESPACES)
+        paragraph_text = ''.join(node.text for node in text_nodes if node.text)
+        if paragraph_text:
+            paragraphs.append(paragraph_text)
+
+    if paragraphs:
+        return _normalize_table_cell("\n".join(paragraphs))
+
+    text_nodes = root.findall('.//w:t', DOCX_XML_NAMESPACES)
+    return _normalize_table_cell(''.join(node.text for node in text_nodes if node.text))
+
 def convert_docx(file_path):
     """转换 Word 文档，支持标题、格式和列表（含编号/层级）"""
     import docx
@@ -591,20 +639,23 @@ def convert_docx(file_path):
         elif element.tag.endswith('tbl'):
             table = next(tables_iter, None)
             if table is not None:
-                # 两遍处理：先收集去重后的行数据，再统一列数输出
+                # 使用底层 XML 读取真实网格，避免 python-docx 将合并单元格重复展开
                 all_rows_data = []
-                for row in table.rows:
-                    # 去重合并单元格：python-docx 对合并单元格会返回重复的 _tc 引用
-                    seen_tcs = set()
-                    unique_cells = []
-                    for cell in row.cells:
-                        tc_id = id(cell._tc)
-                        if tc_id not in seen_tcs:
-                            seen_tcs.add(tc_id)
-                            unique_cells.append(cell)
-                    all_rows_data.append([_normalize_table_cell(cell.text) for cell in unique_cells])
+                table_grid = getattr(getattr(table._tbl, "tblGrid", None), "gridCol_lst", None)
+                max_cols = len(table_grid) if table_grid is not None else 0
 
-                max_cols = max((len(r) for r in all_rows_data), default=0)
+                for tr in table._tbl.tr_lst:
+                    row_data = []
+                    for tc in tr.tc_lst:
+                        span = _get_docx_grid_span(tc)
+                        cell_text = "" if _is_docx_vertical_merge_continuation(tc) else _extract_docx_table_cell_text(tc)
+                        row_data.append(cell_text)
+                        if span > 1:
+                            row_data.extend([""] * (span - 1))
+                    all_rows_data.append(row_data)
+
+                if not max_cols:
+                    max_cols = max((len(r) for r in all_rows_data), default=0)
                 if max_cols == 0:
                     continue
                 for i, row_data in enumerate(all_rows_data):
@@ -624,15 +675,14 @@ def convert_xlsx(file_path):
     content = ""
 
     def _build_merge_map(worksheet):
-        """构建合并单元格映射：(row, col) → 左上角单元格的值"""
-        merge_map = {}
+        """构建合并单元格续格坐标集合，用于保留占位但不重复填充值"""
+        merge_map = set()
         for merge_range in worksheet.merged_cells.ranges:
-            top_left_value = worksheet.cell(merge_range.min_row, merge_range.min_col).value
             for row in range(merge_range.min_row, merge_range.max_row + 1):
                 for col in range(merge_range.min_col, merge_range.max_col + 1):
                     if row == merge_range.min_row and col == merge_range.min_col:
-                        continue  # 左上角本身不需要映射
-                    merge_map[(row, col)] = top_left_value
+                        continue
+                    merge_map.add((row, col))
         return merge_map
 
     try:
@@ -649,30 +699,34 @@ def convert_xlsx(file_path):
                 non_empty_rows = []
                 for row in rows:
                     values = []
+                    occupied_positions = []
                     for cell in row:
+                        coord = (cell.row, cell.column)
+                        is_merged_placeholder = coord in merge_map
                         val = cell.value
-                        if val is None:
-                            val = merge_map.get((cell.row, cell.column))
+                        if val is None and is_merged_placeholder:
+                            val = ""
                         values.append(val)
-                    if any(v is not None and str(v).strip() for v in values):
-                        non_empty_rows.append((row, values))
+                        occupied_positions.append(_table_position_has_content(val, occupied=is_merged_placeholder))
+                    if any(occupied_positions):
+                        non_empty_rows.append((row, values, occupied_positions))
 
                 if non_empty_rows:
-                    def last_non_empty_col_count(values):
+                    def last_non_empty_col_count(values, occupied_positions):
                         for idx in range(len(values) - 1, -1, -1):
-                            if values[idx] is not None and str(values[idx]).strip():
+                            if _table_position_has_content(values[idx], occupied_positions[idx]):
                                 return idx + 1
                         return 0
 
-                    max_cols = max(last_non_empty_col_count(v) for _, v in non_empty_rows)
+                    max_cols = max(last_non_empty_col_count(values, occupied_positions) for _, values, occupied_positions in non_empty_rows)
 
                     if max_cols == 0:
                         continue
 
-                    for i, (_, values) in enumerate(non_empty_rows):
+                    for i, (_, values, occupied_positions) in enumerate(non_empty_rows):
                         row_data = []
                         for j in range(max_cols):
-                            if j < len(values) and values[j] is not None:
+                            if j < len(values) and _table_position_has_content(values[j], occupied_positions[j]):
                                 row_data.append(_normalize_table_cell(values[j]))
                             else:
                                 row_data.append("")
@@ -902,6 +956,34 @@ def _detect_column_split(page_width, words, min_side_words=15):
         return mid
     return None
 
+def _split_pdf_words_by_columns(words, page_chars, col_split, gap=5):
+    """按双栏分割词元，额外保留跨栏词元，避免标题等内容丢失"""
+    left_words, right_words, spanning_words = [], [], []
+    left_chars, right_chars, spanning_chars = [], [], []
+
+    left_limit = col_split + gap
+    right_limit = col_split - gap
+
+    for word in words:
+        if word['x1'] <= left_limit:
+            left_words.append(word)
+        elif word['x0'] >= right_limit:
+            right_words.append(word)
+        else:
+            spanning_words.append(word)
+
+    for char in page_chars:
+        char_x0 = char.get('x0', 0)
+        char_x1 = char.get('x1', 0)
+        if char_x1 <= left_limit:
+            left_chars.append(char)
+        elif char_x0 >= right_limit:
+            right_chars.append(char)
+        else:
+            spanning_chars.append(char)
+
+    return left_words, right_words, spanning_words, left_chars, right_chars, spanning_chars
+
 
 def _lines_to_markdown_blocks(lines, page_chars, body_size):
     """
@@ -1039,22 +1121,26 @@ def _extract_pdf_page_blocks(page, tables):
     col_split = _detect_column_split(page.width, words)
 
     if col_split is not None:
-        # 双栏：分别处理左右两栏，左栏 top 保持原值，右栏 top 偏移到左栏之后
-        left_words = [w for w in words if w['x1'] <= col_split + 5]
-        right_words = [w for w in words if w['x0'] >= col_split - 5]
-        left_chars = [c for c in page_chars if c.get('x1', 0) <= col_split + 5]
-        right_chars = [c for c in page_chars if c.get('x0', 0) >= col_split - 5]
+        # 双栏：分别处理左右两栏，并单独保留跨栏标题/摘要等元素
+        left_words, right_words, spanning_words, left_chars, right_chars, spanning_chars = _split_pdf_words_by_columns(
+            words,
+            page_chars,
+            col_split,
+        )
 
         left_lines = _group_words_into_lines(left_words)
         right_lines = _group_words_into_lines(right_words)
+        spanning_lines = _group_words_into_lines(spanning_words)
 
         left_blocks = _lines_to_markdown_blocks(left_lines, left_chars, body_size)
         right_blocks = _lines_to_markdown_blocks(right_lines, right_chars, body_size)
+        spanning_blocks = _lines_to_markdown_blocks(spanning_lines, spanning_chars, body_size)
 
         left_max = max((top for top, _ in left_blocks), default=0.0)
         offset = left_max + page.height
         right_shifted = [(top + offset, content) for top, content in right_blocks]
 
+        blocks.extend(spanning_blocks)
         blocks.extend(left_blocks)
         blocks.extend(right_shifted)
     else:
