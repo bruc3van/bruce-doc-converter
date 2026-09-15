@@ -212,12 +212,26 @@ Linux 下默认不会为 Chromium 传入 `--no-sandbox`。如果你理解风险�
 2. **PDF 优先使用文本型**，扫描型建议先 OCR
 3. **文件大小建议 < 50MB**
 
+## DeepSeek Harness 插件
+
+如果你用 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（`dsh`），可以额外安装 [`dsh-plugin/`](dsh-plugin/README.md)，把 `bdc` 变成三个模型工具（`doc_convert` / `doc_batch` / `doc_setup`）：
+
+```sh
+dsh plugin --profile web add bruce-doc-converter-dsh
+```
+
+工具由插件拼好 argv 后经 `ctx.shell` 执行，因此沙箱、审批、超时和输出上限照常生效；CLI 的 JSON 变成类型化结果，安装方式和路径改由 `cordis.yml` 配置项决定，不再占用提示词。详见 [插件 README](dsh-plugin/README.md)。
+
 ## 项目结构
 
 ```
 bruce-doc-converter/
 ├── bruce-doc-converter-skill/
 │   └── SKILL.md                  # Agent Skill 定义
+├── dsh-plugin/                   # DeepSeek Harness 插件（npm: bruce-doc-converter-dsh）
+│   ├── src/                      # 工具、runner、信封校验、内置技能
+│   ├── tests/                    # 单元测试 + 真实 CLI 端到端测试
+│   └── cordis.patch.yml          # bundle 补丁层
 ├── pyproject.toml                # Python 包元数据
 ├── requirements.txt              # 本地开发依赖
 ├── bruce_doc_converter/

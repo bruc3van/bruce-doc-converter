@@ -212,12 +212,26 @@ Scanned PDFs require OCR first. Protected PDFs must be unlocked before conversio
 2. **Prefer text-based PDFs** over scanned images; run OCR first if needed
 3. **Keep files under 50 MB** for best performance
 
+## DeepSeek Harness plugin
+
+For [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (`dsh`), install [`dsh-plugin/`](dsh-plugin/README.en.md) to expose `bdc` as three model tools (`doc_convert`, `doc_batch`, `doc_setup`):
+
+```sh
+dsh plugin --profile web add bruce-doc-converter-dsh
+```
+
+The plugin builds the argv and runs it through `ctx.shell`, so sandboxing, approval, timeouts, and output caps apply; the CLI's JSON becomes a typed tool result, and install paths move into validated `cordis.yml` fields instead of prompt text. See the [plugin README](dsh-plugin/README.en.md).
+
 ## Project Structure
 
 ```
 bruce-doc-converter/
 ├── bruce-doc-converter-skill/
 │   └── SKILL.md                  # Agent Skill definition
+├── dsh-plugin/                   # DeepSeek Harness plugin (npm: bruce-doc-converter-dsh)
+│   ├── src/                      # Tools, runner, envelope validation, embedded skill
+│   ├── tests/                    # Unit tests plus real-CLI end-to-end tests
+│   └── cordis.patch.yml          # Bundle patch layer
 ├── pyproject.toml                # Python package metadata
 ├── requirements.txt              # Local development dependencies
 ├── bruce_doc_converter/

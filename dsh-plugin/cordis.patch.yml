@@ -1,0 +1,23 @@
+# Bundle layer for the DeepSeek Harness document-converter plugin.
+#
+# `dsh plugin --profile <name> add bruce-doc-converter-dsh` records this bundle in
+# the profile and applies this patch when the profile boots. A profile's own
+# `cordis.patch.yml` (and the home-level one) is applied after this layer, so a
+# patch there can replace this row's whole `config` by id.
+- insert:
+    - id: bruce-doc-converter
+      name: bruce-doc-converter-dsh
+      # config:
+      #   # Absolute path or PATH name of the `bdc` executable. Point this at
+      #   # /path/to/.venv/bin/bdc when the CLI is not on PATH.
+      #   bdcPath: bdc
+      #   # Cooperative timeout for one conversion / batch (ms). Default 180000.
+      #   convertTimeoutMs: 180000
+      #   # Cooperative timeout for `doc_setup` (ms). Default 600000.
+      #   setupTimeoutMs: 600000
+      #   # Cap on Markdown characters returned to the model. Default 200000.
+      #   maxMarkdownChars: 200000
+      #   # Shell dialect used to quote argv for the mounted shell provider.
+      #   # Defaults to posix, or powershell on win32. Set it explicitly when
+      #   # `ctx.shell` executes in a remote execution world.
+      #   shellDialect: posix
