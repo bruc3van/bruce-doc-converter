@@ -1,0 +1,74 @@
+name: Conversion contracts
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  contracts:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python: ['3.8', '3.12']
+        node: ['22.0.0']
+        include:
+          - os: ubuntu-latest
+            python: '3.12'
+            node: '24'
+        exclude:
+          - os: macos-latest
+            python: '3.8'
+    runs-on: ${{ matrix.os }}
+    env:
+      BDC_REQUIRE_NODE_TESTS: '1'
+      PUPPETEER_SKIP_DOWNLOAD: 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+          cache-dependency-path: bruce_doc_converter/md_to_docx/package-lock.json
+      - run: python -m pip install -e . build
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+        working-directory: bruce_doc_converter/md_to_docx
+      - run: python -m unittest discover -s tests -p "test_*.py"
+      - run: node --test tests/md_to_docx.test.js
+      - run: python -m build
+      - run: python scripts/check_wheel.py
+
+  dsh-plugin:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      BDC_REQUIRE_INTEGRATION: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.19.0'
+      - uses: pnpm/action-setup@v4
+        with:
+          version: '10.28.2'
+      - run: python -m pip install -e .
+      - run: pnpm install --frozen-lockfile --ignore-scripts
+        working-directory: dsh-plugin
+      - run: pnpm typecheck
+        working-directory: dsh-plugin
+      - run: pnpm test
+        working-directory: dsh-plugin
+      - run: pnpm build
+        working-directory: dsh-plugin

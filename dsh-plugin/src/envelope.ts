@@ -5,7 +5,7 @@
  * @module bruce-doc-converter-dsh/envelope
  */
 
-import type { CliBatchEnvelope, CliConvertEnvelope, CliConvertSuccess, CliFailure, CliSetupEnvelope } from './types.ts'
+import type { CliBatchEnvelope, CliConvertEnvelope, CliConvertSuccess, CliFailure, CliSetupEnvelope, CliDiagnostic } from './types.ts'
 
 /** One stdout payload that is not a usable `bdc` envelope. */
 export class CliProtocolError extends Error {
@@ -106,6 +106,8 @@ function readOptionalStringArray(record: Record<string, unknown>, key: string, p
 
 function readFailure(record: Record<string, unknown>, path: string): CliFailure {
   return {
+    ...present('warnings', readOptionalStringArray(record, 'warnings', path)),
+    ...present('diagnostics', readDiagnostics(record, path)),
     schemaVersion: readOptionalString(record, 'schema_version', path) ?? null,
     success: false,
     ...present('inputPath', readOptionalString(record, 'input_path', path)),
@@ -124,6 +126,9 @@ function readSuccess(record: Record<string, unknown>, path: string): CliConvertS
     throw new CliProtocolError(`${path}.output_path must be a string or null`)
   }
   return {
+    ...present('markdownChars', record['markdown_chars'] === undefined ? undefined : readNumber(record, 'markdown_chars', path)),
+    ...present('markdownTruncated', readOptionalBoolean(record, 'markdown_truncated', path)),
+    ...present('diagnostics', readDiagnostics(record, path)),
     schemaVersion: readString(record, 'schema_version', path),
     success: true,
     inputPath: readString(record, 'input_path', path),
@@ -168,12 +173,33 @@ export function readBatchEnvelope(value: unknown): CliBatchEnvelope {
     return { inputPath: readString(entry, 'input_path', path), result: readConvertEnvelope(entry['result']) }
   })
   return {
+    ...present('manifestPath', readOptionalString(record, 'manifest_path', 'batch payload')),
+    ...present('omitted', record['omitted'] === undefined ? undefined : readNumber(record, 'omitted', 'batch payload')),
     success: readBoolean(record, 'success', 'batch payload'),
     total: readNumber(record, 'total', 'batch payload'),
     succeeded: readNumber(record, 'succeeded', 'batch payload'),
     failed: readNumber(record, 'failed', 'batch payload'),
     results,
   }
+}
+
+function readDiagnostics(record: Record<string, unknown>, path: string): readonly CliDiagnostic[] | undefined {
+  const value = record['diagnostics']
+  if (value === undefined) return undefined
+  if (!Array.isArray(value)) throw new CliProtocolError(`${path}.diagnostics must be an array`)
+  return value.map((item, index) => {
+    const location = `${path}.diagnostics[${index}]`
+    const detail = asRecord(item, location)
+    return {
+      code: readString(detail, 'code', location),
+      severity: readString(detail, 'severity', location),
+      message: readString(detail, 'message', location),
+      ...present('page', detail['page'] === undefined ? undefined : readNumber(detail, 'page', location)),
+      ...present('sheet', readOptionalString(detail, 'sheet', location)),
+      ...present('cell', readOptionalString(detail, 'cell', location)),
+      ...present('status', readOptionalString(detail, 'status', location)),
+    }
+  })
 }
 
 /**
@@ -187,6 +213,7 @@ export function readSetupEnvelope(value: unknown): CliSetupEnvelope {
   if (!readBoolean(record, 'success', 'setup payload')) {
     return {
       success: false,
+      ...present('suggestion', readOptionalString(record, 'suggestion', 'setup payload')),
       ...present('errorCode', readOptionalString(record, 'error_code', 'setup payload')),
       ...present('error', readOptionalString(record, 'error', 'setup payload')),
       ...present('retryable', readOptionalBoolean(record, 'retryable', 'setup payload')),

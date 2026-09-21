@@ -127,7 +127,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(5.0, convert.call_args.kwargs["mermaid_scale"])
 
     def test_batch_passes_custom_mermaid_scale(self):
-        with patch("bruce_doc_converter.cli.batch_convert", return_value=[]) as batch:
+        with patch("bruce_doc_converter.cli.iter_batch_convert", return_value=[]) as batch:
             stdout = io.StringIO()
             with contextlib.redirect_stdout(stdout):
                 exit_code = cli.main(["batch", "/tmp/docs", "--mermaid-scale", "3"])

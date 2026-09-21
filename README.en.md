@@ -155,7 +155,7 @@ For batch conversion, `success` means every file converted successfully. If only
 - **Table conversion**: Converts tables to clean Markdown
 - **List support**: Ordered, unordered, and nested lists
 - **Mermaid diagrams**: Renders Mermaid code blocks via `mmdc` and embeds them as PNG images in Word
-- **Image extraction**: Extracts embedded images during Office/PDF → Markdown conversion
+- **Image extraction**: Extracts embedded images from Word/Excel/PowerPoint; PDF image extraction is not supported
 
 ## Supported Formats
 
@@ -172,7 +172,12 @@ For batch conversion, `success` means every file converted successfully. If only
 ## Requirements
 
 - **Python 3.8+** (required)
-- **Node.js 14+** (optional, only needed for Markdown → Word)
+- **Node.js >=22.0** (optional, only needed for Markdown → Word; checked before installation/conversion)
+
+The standalone CLI minimum follows the locked dependencies (`chevrotain` requires
+Node.js >=22.0.0) and has been tested on Node 22.0.0. The optional DSH plugin keeps
+its independent `^22.19 || >=24` requirement; it does not raise the CLI requirement
+for other agents using the Skill.
 
 ## FAQ
 
@@ -244,6 +249,64 @@ bruce-doc-converter/
     ├── test_convert_document.py
     └── md_to_docx.test.js
 ```
+
+## Integrity and bounded batch output
+
+```bash
+bdc convert budget.xlsx --strict
+bdc convert report.docx --content preview --preview-chars 4000
+bdc batch ./documents --content none --manifest auto --max-results 200
+bdc batch ./documents --content none --jsonl --manifest ./results.jsonl
+```
+
+`--content full` remains the default. `preview` returns a prefix and `none` omits
+the body; the saved document stays complete. `markdown_chars` counts Unicode
+code points in the full text and `markdown_truncated` identifies previews.
+`--max-results` caps response entries and requires a manifest; `omitted` reports
+the omitted count. It cannot be combined with `--jsonl`.
+
+The JSONL manifest contains every file outcome (`type: result`) and a final
+`type: summary` record on normal completion. Body inclusion follows `--content`.
+Records flush after each file so completed work remains inspectable after an
+interruption. Absence of the summary means the batch did not finish normally.
+`--manifest auto` creates a unique file under the output directory or the input
+root's `Markdown/`. Explicit manifest paths require an existing parent directory
+and never overwrite an existing file.
+
+Output names are exclusively reserved and files are written atomically. Images
+use a separate directory per conversion so repeated/concurrent runs preserve old
+results. Uncached Excel formulas remain visible and produce
+`FORMULA_CACHE_MISSING` diagnostics with worksheet/cell coordinates; formulas
+are not calculated. PDF diagnostics report each page as `extracted`, `fallback`,
+`failed`, or `empty`. Empty and scanned pages cannot be reliably distinguished
+solely by lack of text, so both warn. Strict mode rejects content-loss/fallback
+warnings, including missing formula caches, empty pages and failed image/Mermaid
+embedding, without writing that conversion's output.
+
+## Development checks
+
+Format extractors live in `bruce_doc_converter/formats/`; `converter.py` retains
+the existing Python entry points and orchestration. `output.py` owns exclusive
+reservation and atomic writes. Markdown uses markdown-it CommonMark parsing with
+tables/strikethrough, literal raw HTML and Mermaid fence rendering.
+
+```bash
+python -m pip install -e . build
+npm ci --ignore-scripts --prefix bruce_doc_converter/md_to_docx
+python -m unittest discover -s tests -p "test_*.py"
+node --test tests/md_to_docx.test.js
+pnpm --dir dsh-plugin install --frozen-lockfile --ignore-scripts
+pnpm --dir dsh-plugin typecheck
+pnpm --dir dsh-plugin test
+python -m build
+python scripts/check_wheel.py
+```
+
+`tests/fixtures/` is a reproducible synthetic corpus. Tests inspect saved DOCX
+XML, cached/uncached formulas, concurrent output isolation and JSONL contracts.
+CLI CI covers Windows/Linux/macOS with Python 3.8/3.12 (macOS: 3.12 only) and Node
+22.0, plus Node 24 on Linux. The DSH plugin uses a separate Node 22.19 job. Missing
+real CLI integration prerequisites fail CI instead of skipping.
 
 ## License
 

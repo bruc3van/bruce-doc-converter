@@ -59,6 +59,13 @@ The bundle inserts one row with id `bruce-doc-converter`. Override it by id from
 
 Returned Markdown is capped at `maxMarkdownChars`; the complete text always stays in the file at `outputPath`. `doc_batch` keeps at most `maxBatchEntries` per-file entries and reports the rest as `omitted`.
 
+Single-file calls request `--content preview` from the CLI. Batch calls use
+`--content none --manifest auto --max-results`, preventing full bodies from
+entering stdout before truncation. `manifestPath` points to every outcome in a
+JSONL manifest. Both conversion tools accept `strict: true` and retain warnings
+and page/cell diagnostics. A matching CLI is required; older CLIs report
+`BDC_CLI_INCOMPATIBLE` with upgrade guidance.
+
 ## Configuration
 
 | Field | Default | Meaning |
@@ -96,7 +103,7 @@ pnpm run typecheck  # source and tests
 pnpm test           # unit tests, plus real-CLI end-to-end when bdc is installed
 ```
 
-`tests/integration.spec.ts` skips itself when `command -v bdc` fails, so a machine without `bdc` still passes the suite.
+`tests/integration.spec.ts` invokes the real CLI through Bash or Windows PowerShell. It skips locally when the CLI is absent; `BDC_REQUIRE_INTEGRATION=1` makes missing prerequisites fail the suite, as configured in CI.
 
 Publishing:
 

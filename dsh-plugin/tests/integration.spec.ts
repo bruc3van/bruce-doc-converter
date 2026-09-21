@@ -17,9 +17,12 @@ import { callTool, mountWith } from './harness.ts'
 const FIXTURES = join(dirname(fileURLToPath(import.meta.url)), 'fixtures')
 
 /** Run one command line the way the local bash provider does. */
+const windows = process.platform === 'win32'
 function execBash(command: string, timeoutMs = 120_000): Promise<{ code: number | null; stdout: string; stderr: string }> {
   return new Promise((resolve) => {
-    execFile('bash', ['-c', command], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, timeout: timeoutMs }, (error, stdout, stderr) => {
+    const shell = windows ? 'powershell.exe' : 'bash'
+    const argv = windows ? ['-NoProfile', '-NonInteractive', '-Command', `& ${command}; exit $LASTEXITCODE`] : ['-c', command]
+    execFile(shell, argv, { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, timeout: timeoutMs, windowsHide: true }, (error, stdout, stderr) => {
       const failure = error as (Error & { code?: unknown }) | null
       const code = failure === null ? 0 : typeof failure.code === 'number' ? failure.code : 1
       resolve({ code, stdout: String(stdout), stderr: String(stderr) })
@@ -62,13 +65,18 @@ async function fixtureDir(): Promise<string> {
   return dir
 }
 
-const installed = (await execBash('command -v bdc')).code === 0
+const installed = (await execBash("'bdc' '--help-json'")).code === 0
+if (!installed && process.env.BDC_REQUIRE_INTEGRATION === '1') throw new Error('bdc must be installed for integration tests')
+
+function mountReal(config: Parameters<typeof mountWith>[1] = {}) {
+  return mountWith(realShell(), { shellDialect: windows ? 'powershell' : 'posix', ...config })
+}
 
 describe.skipIf(!installed)('bdc end to end', () => {
   it('converts a real .docx and returns its Markdown', async () => {
     const dir = await fixtureDir()
     try {
-      const harness = mountWith(realShell(), { bdcPath: 'bdc' })
+      const harness = mountReal({ bdcPath: 'bdc' })
       const { value, text } = await callTool(harness, 'doc_convert', { path: join(dir, 'sample.docx') })
       expect(value['success']).toBe(true)
       expect(String(value['markdown'])).toContain('Quarterly Report')
@@ -86,7 +94,7 @@ describe.skipIf(!installed)('bdc end to end', () => {
     const dir = await fixtureDir()
     try {
       const target = join(dir, 'exported')
-      const harness = mountWith(realShell(), { bdcPath: 'bdc' })
+      const harness = mountReal({ bdcPath: 'bdc' })
       const { value } = await callTool(harness, 'doc_convert', { path: join(dir, 'sample.docx'), outputDir: target, extractImages: true })
       expect(value['success']).toBe(true)
       expect(String(value['outputPath'])).toMatch(/exported[/\\]sample\.md$/)
@@ -99,7 +107,7 @@ describe.skipIf(!installed)('bdc end to end', () => {
   it('caps the returned Markdown while the written file keeps the document', async () => {
     const dir = await fixtureDir()
     try {
-      const harness = mountWith(realShell(), { bdcPath: 'bdc', maxMarkdownChars: 12 })
+      const harness = mountReal({ bdcPath: 'bdc', maxMarkdownChars: 12 })
       const { value, text } = await callTool(harness, 'doc_convert', { path: join(dir, 'sample.docx') })
       expect(value['markdownTruncated']).toBe(true)
       expect(String(value['markdown'])).toHaveLength(12)
@@ -113,11 +121,14 @@ describe.skipIf(!installed)('bdc end to end', () => {
   it('summarizes a real batch without Markdown bodies', async () => {
     const dir = await fixtureDir()
     try {
-      const harness = mountWith(realShell(), { bdcPath: 'bdc' })
+      const harness = mountReal({ bdcPath: 'bdc' })
       const { value, text } = await callTool(harness, 'doc_batch', { path: dir })
       expect(value).toMatchObject({ success: true, total: 1, succeeded: 1, failed: 0 })
       expect(JSON.stringify(value)).not.toContain('Quarterly Report')
       expect(text).toContain('1/1 converted')
+      const manifest = await readFile(String(value['manifestPath']), 'utf8')
+      expect(manifest).toContain('"type": "summary"')
+      expect(manifest).not.toContain('markdown_content')
     } finally {
       await rm(dir, { recursive: true, force: true })
     }
@@ -127,7 +138,7 @@ describe.skipIf(!installed)('bdc end to end', () => {
     const dir = await fixtureDir()
     try {
       await writeFile(join(dir, 'legacy.doc'), 'not a real document')
-      const harness = mountWith(realShell(), { bdcPath: 'bdc' })
+      const harness = mountReal({ bdcPath: 'bdc' })
       const { value, text } = await callTool(harness, 'doc_convert', { path: join(dir, 'legacy.doc') })
       expect(value).toMatchObject({ success: false, errorCode: 'UNSUPPORTED_FORMAT', inputFormat: 'doc' })
       expect(text).toContain('Conversion failed (UNSUPPORTED_FORMAT)')
@@ -139,7 +150,7 @@ describe.skipIf(!installed)('bdc end to end', () => {
   it('reports a real missing-file failure', async () => {
     const dir = await fixtureDir()
     try {
-      const harness = mountWith(realShell(), { bdcPath: 'bdc' })
+      const harness = mountReal({ bdcPath: 'bdc' })
       const { value } = await callTool(harness, 'doc_convert', { path: join(dir, 'absent.docx') })
       expect(value).toMatchObject({ success: false, errorCode: 'FILE_NOT_FOUND' })
     } finally {
@@ -148,7 +159,7 @@ describe.skipIf(!installed)('bdc end to end', () => {
   })
 
   it('reports a missing executable when bdcPath is wrong', async () => {
-    const harness = mountWith(realShell(), { bdcPath: 'bdc-does-not-exist' })
+    const harness = mountReal({ bdcPath: 'bdc-does-not-exist' })
     const { value } = await callTool(harness, 'doc_convert', { path: '/tmp/whatever.docx' })
     expect(value).toMatchObject({ success: false, errorCode: 'BDC_NOT_FOUND' })
   })

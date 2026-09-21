@@ -79,6 +79,10 @@ bdc batch "<directory>" --mermaid-scale 5
 
 For Markdown to Word, initialize the Node.js dependencies explicitly before first use:
 
+Markdown to Word requires **Node.js >=22.0** for the CLI's locked dependency set.
+Office/PDF to Markdown does not require Node.js. The optional DSH plugin has its
+own runtime requirement; it does not raise the minimum for this standalone CLI.
+
 ```bash
 bdc setup-node
 ```
@@ -118,6 +122,7 @@ On failure:
 - Use `error_code`, `retryable`, optional `next_command`, `error`, and optional `suggestion` to decide the next step.
 - Do not pre-check Python dependencies. Run the command first and react to JSON failure.
 - If Markdown to Word returns `DEPENDENCY_INSTALL_REQUIRED`, run `next_command` when present, otherwise run `bdc setup-node`, then retry.
+- If `setup-node` or conversion returns `NODE_NOT_FOUND` or `NODE_VERSION_UNSUPPORTED`, follow `suggestion` to install a supported Node.js runtime; rerunning dependency setup alone cannot fix an old runtime.
 - `bdc setup-node` is idempotent and may return `already_installed: true` with `install_action: "skipped"`.
 
 ## Upgrade
@@ -133,6 +138,13 @@ pip install --user --upgrade bruce-doc-converter   # if installed via pip --user
 ```
 
 After upgrading, re-run `bdc setup-node` if you use Markdown to Word conversion, as Node.js dependencies may also have been updated.
+
+Existing commands and their default JSON output remain compatible: `convert`
+and `batch` still return complete `markdown_content` for Office/PDF input.
+Treat extra fields such as `diagnostics` as additive. Read the generated paths
+from `output_path` and `extracted_images`; do not construct image filenames.
+Preview, body omission, strict mode, and JSONL streaming only activate when
+explicitly requested by their corresponding CLI flags.
 
 ## Troubleshooting installation
 

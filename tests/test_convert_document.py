@@ -584,6 +584,7 @@ class ConvertDocumentTests(unittest.TestCase):
             (bin_dir / "mmdc.cmd").write_text("@echo off\n", encoding="utf-8")
             (shared_dir / "node_modules" / "docx").mkdir()
             (shared_dir / "node_modules" / "jsdom").mkdir()
+            (shared_dir / "node_modules" / "markdown-it").mkdir()
             (shared_dir / "node_modules" / "@mermaid-js" / "mermaid-cli").mkdir(parents=True)
 
             with patch("bruce_doc_converter.converter._get_node_shared_root", return_value=tmp_dir):
@@ -613,6 +614,7 @@ class ConvertDocumentTests(unittest.TestCase):
             (bin_dir / "mmdc.cmd").write_text("@echo off\n", encoding="utf-8")
             (shared_dir / "node_modules" / "docx").mkdir()
             (shared_dir / "node_modules" / "jsdom").mkdir()
+            (shared_dir / "node_modules" / "markdown-it").mkdir()
             (shared_dir / "node_modules" / "@mermaid-js" / "mermaid-cli").mkdir(parents=True)
 
             with patch("bruce_doc_converter.converter._get_node_shared_root", return_value=tmp_dir):

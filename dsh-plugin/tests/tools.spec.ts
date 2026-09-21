@@ -34,6 +34,21 @@ describe('registration', () => {
 })
 
 describe('doc_convert', () => {
+  it('preserves CLI preview length and Unicode characters', async () => {
+    const payload = { ...JSON.parse(CONVERT_SUCCESS), markdown_content: '😀文', markdown_chars: 100, markdown_truncated: true }
+    const harness = mount({ maxMarkdownChars: 2 }, { stdoutText: JSON.stringify(payload) })
+    const { value, text } = await callTool(harness, 'doc_convert', { path: '/docs/report.docx', strict: true })
+    expect(value).toMatchObject({ markdown: '😀文', markdownChars: 100, markdownTruncated: true })
+    expect(text).toContain('truncated after 2 of 100 characters')
+    expect(harness.commands[0]).toContain("'--strict'")
+  })
+
+  it('preserves diagnostics on a strict content failure', async () => {
+    const diagnostic = { code: 'FORMULA_CACHE_MISSING', severity: 'warning', message: 'uncached', sheet: 'Budget', cell: 'B4' }
+    const harness = mount({}, { exitCode: 1, stdoutText: JSON.stringify({ success: false, error_code: 'CONTENT_INCOMPLETE', error: 'incomplete', warnings: ['uncached'], diagnostics: [diagnostic] }) })
+    const { value } = await callTool(harness, 'doc_convert', { path: '/docs/budget.xlsx', strict: true })
+    expect(value).toMatchObject({ success: false, warnings: ['uncached'], diagnostics: [diagnostic] })
+  })
   it('returns the Markdown text and the written path', async () => {
     const harness = mount({}, { stdoutText: CONVERT_SUCCESS })
     const { value, text } = await callTool(harness, 'doc_convert', { path: '/docs/report.docx' })
@@ -62,14 +77,14 @@ describe('doc_convert', () => {
     const harness = mount({ bdcPath: '/opt/my tools/bdc' }, { stdoutText: CONVERT_SUCCESS })
     await callTool(harness, 'doc_convert', { path: '/docs/my report.docx', outputDir: '/out dir', extractImages: true, mermaidScale: 5 })
     expect(harness.commands[0]).toBe(
-      '\'/opt/my tools/bdc\' \'convert\' \'/docs/my report.docx\' \'--output-dir\' \'/out dir\' \'--extract-images\' \'true\' \'--mermaid-scale\' \'5\'',
+      '\'/opt/my tools/bdc\' \'convert\' \'/docs/my report.docx\' \'--content\' \'preview\' \'--preview-chars\' \'200000\' \'--output-dir\' \'/out dir\' \'--extract-images\' \'true\' \'--mermaid-scale\' \'5\'',
     )
   })
 
   it('quotes for PowerShell when configured', async () => {
     const harness = mount({ shellDialect: 'powershell' }, { stdoutText: CONVERT_SUCCESS })
     await callTool(harness, 'doc_convert', { path: '/docs/it\'s.docx' })
-    expect(harness.commands[0]).toBe('\'bdc\' \'convert\' \'/docs/it\'\'s.docx\'')
+    expect(harness.commands[0]).toBe('\'bdc\' \'convert\' \'/docs/it\'\'s.docx\' \'--content\' \'preview\' \'--preview-chars\' \'200000\'')
   })
 
   it('honors an explicit output dir argument', async () => {
@@ -193,6 +208,18 @@ describe('doc_convert', () => {
 })
 
 describe('doc_batch', () => {
+  it('recognizes an older CLI rejecting batch flags', async () => {
+    const harness = mount({}, { exitCode: 1, stdoutText: JSON.stringify({ success: false, error_code: 'USAGE_ERROR', error: 'unrecognized arguments' }) })
+    const { value } = await callTool(harness, 'doc_batch', { path: '/d' })
+    expect(value).toMatchObject({ success: false, errorCode: 'BDC_CLI_INCOMPATIBLE' })
+  })
+
+  it('keeps the complete manifest and CLI omission count', async () => {
+    const harness = mount({}, { stdoutText: JSON.stringify({ success: true, total: 5, succeeded: 5, failed: 0, results: [], omitted: 5, manifest_path: '/out/results.jsonl' }) })
+    const { value, text } = await callTool(harness, 'doc_batch', { path: '/d' })
+    expect(value).toMatchObject({ manifestPath: '/out/results.jsonl', omitted: 5 })
+    expect(text).toContain('Complete manifest: /out/results.jsonl')
+  })
   const batchPayload = JSON.stringify({
     schema_version: '1.0',
     success: false,
@@ -227,7 +254,7 @@ describe('doc_batch', () => {
   it('passes recursive false explicitly', async () => {
     const harness = mount({}, { stdoutText: batchPayload })
     await callTool(harness, 'doc_batch', { path: '/d', recursive: false, mermaidScale: 3 })
-    expect(harness.commands[0]).toBe('\'bdc\' \'batch\' \'/d\' \'--recursive\' \'false\' \'--mermaid-scale\' \'3\'')
+    expect(harness.commands[0]).toBe('\'bdc\' \'batch\' \'/d\' \'--content\' \'none\' \'--manifest\' \'auto\' \'--max-results\' \'200\' \'--recursive\' \'false\' \'--mermaid-scale\' \'3\'')
   })
 
   it('advises per-file conversion when a batch overflows the capture budget', async () => {
@@ -248,6 +275,13 @@ describe('doc_batch', () => {
 })
 
 describe('doc_setup', () => {
+  it('passes through Node runtime upgrade guidance', async () => {
+    const harness = mount({}, { exitCode: 1, stdoutText: JSON.stringify({ success: false,
+      error_code: 'NODE_VERSION_UNSUPPORTED', error: 'Node 20 is unsupported', suggestion: 'Install Node.js >=22.19' }) })
+    const { value, text } = await callTool(harness, 'doc_setup', {})
+    expect(value).toMatchObject({ success: false, errorCode: 'NODE_VERSION_UNSUPPORTED', suggestion: 'Install Node.js >=22.19' })
+    expect(text).toContain('Install Node.js >=22.19')
+  })
   it('maps an idempotent success', async () => {
     const harness = mount({}, {
       stdoutText: JSON.stringify({

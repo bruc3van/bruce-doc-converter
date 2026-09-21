@@ -76,7 +76,7 @@ function stderrTail(execution: BdcExecution, maxChars = 400): string {
 /** The shell could not start the configured executable at all. */
 function missingExecutable(execution: BdcExecution): boolean {
   if (execution.exitCode === 127) return true
-  return /command not found|not recognized as the name of a cmdlet|not recognized as an internal or external command/i.test(execution.stderr)
+  return /command not found|CommandNotFoundException|not recognized as the name of a cmdlet|not recognized as an internal or external command/i.test(execution.stderr)
 }
 
 function validateNonEmpty(name: string, value: string): void {
@@ -214,6 +214,13 @@ async function batchExecution(
     return batchFailureValue(directory, BDC_PROTOCOL_ERROR, `${messageOf(error)}${tail === '' ? '' : `; stderr: ${tail}`}`)
   }
   try {
+    if (payload && typeof payload === 'object' && !('results' in payload) && 'error_code' in payload) {
+      const failure = readConvertEnvelope(payload)
+      if (!failure.success) {
+        const value = cliFailureValue(directory, failure)
+        return batchFailureValue(directory, value.errorCode ?? BDC_PROTOCOL_ERROR, value.error ?? 'Batch failed', value)
+      }
+    }
     return batchValue(directory, readBatchEnvelope(payload), options.maxBatchEntries)
   } catch (error) {
     return batchFailureValue(directory, BDC_PROTOCOL_ERROR, messageOf(error))
@@ -273,8 +280,9 @@ export function registerConvertTool(ctx: Context, options: DocToolOptions): void
     description: convertDescription(options),
     parameters: {
       path: { type: 'string', required: true, description: 'Path of the .docx, .xlsx, .pptx, .pdf, or .md file to convert.' },
+      strict: { type: 'boolean', description: 'Reject content-loss or fallback warnings without producing output.' },
       outputDir: { type: 'string', description: 'Directory for the generated file. Defaults to a `Markdown/` directory beside the input.' },
-      extractImages: { type: 'boolean', description: 'Also write images embedded in a .docx, .xlsx, .pptx, or .pdf input next to the Markdown.' },
+      extractImages: { type: 'boolean', description: 'Also write images embedded in a .docx, .xlsx, or .pptx input next to the Markdown. PDF image extraction is not supported.' },
       mermaidScale: { type: 'number', description: 'PNG scale factor for Mermaid diagrams when converting Markdown to Word. Defaults to 4.' },
     },
     timeoutMs: options.convertTimeoutMs,
@@ -293,7 +301,8 @@ export function registerConvertTool(ctx: Context, options: DocToolOptions): void
       validateNonEmpty('path', args.path)
       if (args.outputDir !== undefined) validateNonEmpty('outputDir', args.outputDir)
       if (args.mermaidScale !== undefined) validateMermaidScale(args.mermaidScale, options.maxMermaidScale)
-      const argv = ['convert', args.path]
+      const argv = ['convert', args.path, '--content', 'preview', '--preview-chars', String(options.maxMarkdownChars)]
+      if (args.strict === true) argv.push('--strict')
       if (args.outputDir !== undefined) argv.push('--output-dir', args.outputDir)
       if (args.extractImages === true) argv.push('--extract-images', 'true')
       if (args.mermaidScale !== undefined) argv.push('--mermaid-scale', String(args.mermaidScale))
@@ -315,9 +324,10 @@ export function registerBatchTool(ctx: Context, options: DocToolOptions): void {
     description: batchDescription(options),
     parameters: {
       path: { type: 'string', required: true, description: 'Directory holding the documents to convert.' },
+      strict: { type: 'boolean', description: 'Reject individual conversions with content-loss or fallback warnings.' },
       outputDir: { type: 'string', description: 'Directory for the generated files. Defaults to a `Markdown/` directory inside the scanned directory.' },
       recursive: { type: 'boolean', description: 'Also convert supported files in subdirectories. Defaults to true.' },
-      extractImages: { type: 'boolean', description: 'Also write images embedded in each Office/PDF input next to its Markdown.' },
+      extractImages: { type: 'boolean', description: 'Also write images embedded in each Office input next to its Markdown. PDF image extraction is not supported.' },
       mermaidScale: { type: 'number', description: 'PNG scale factor for Mermaid diagrams when converting Markdown to Word. Defaults to 4.' },
     },
     timeoutMs: options.convertTimeoutMs,
@@ -330,7 +340,8 @@ export function registerBatchTool(ctx: Context, options: DocToolOptions): void {
       validateNonEmpty('path', args.path)
       if (args.outputDir !== undefined) validateNonEmpty('outputDir', args.outputDir)
       if (args.mermaidScale !== undefined) validateMermaidScale(args.mermaidScale, options.maxMermaidScale)
-      const argv = ['batch', args.path]
+      const argv = ['batch', args.path, '--content', 'none', '--manifest', 'auto', '--max-results', String(options.maxBatchEntries)]
+      if (args.strict === true) argv.push('--strict')
       if (args.outputDir !== undefined) argv.push('--output-dir', args.outputDir)
       if (args.recursive === false) argv.push('--recursive', 'false')
       if (args.extractImages === true) argv.push('--extract-images', 'true')

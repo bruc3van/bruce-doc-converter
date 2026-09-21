@@ -6,6 +6,37 @@
 
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
+
+function supportedNodeVersion(version = process.versions.node) {
+  const major = Number(version.split('.')[0]);
+  return Number.isInteger(major) && major >= 22;
+}
+
+function writeUniqueDocx(outputDir, baseName, buffer) {
+  // Reserve before writing so concurrent conversions never replace each other.
+  let outputPath;
+  while (true) {
+    outputPath = resolveUniqueDocxPath(outputDir, baseName);
+    try {
+      fs.closeSync(fs.openSync(outputPath, 'wx'));
+      break;
+    } catch (error) {
+      if (error.code !== 'EEXIST') throw error;
+    }
+  }
+  const temporary = path.join(outputDir, `.bdc-${crypto.randomUUID()}.tmp`);
+  try {
+    fs.writeFileSync(temporary, buffer, { flag: 'wx' });
+    fs.renameSync(temporary, outputPath);
+    return outputPath;
+  } catch (error) {
+    fs.rmSync(outputPath, { force: true });
+    throw error;
+  } finally {
+    fs.rmSync(temporary, { force: true });
+  }
+}
 
 /**
  * 生成不覆盖已有文件的输出路径
@@ -35,8 +66,11 @@ function resolveUniqueDocxPath(outputDir, baseName) {
  * @param {string} outputDir - 输出目录（可选）
  * @returns {Object} 转换结果
  */
-async function convertMarkdownToDocx(inputPath, outputDir) {
+async function convertMarkdownToDocx(inputPath, outputDir, options = {}) {
   try {
+    if (!supportedNodeVersion()) {
+      return { success: false, error_code: 'NODE_VERSION_UNSUPPORTED', error: 'Markdown conversion requires Node.js >=22.0.' };
+    }
     const { Document, Packer } = require('docx');
     const { markdownToHTML } = require('./markdown-converter');
     const { convertHTMLToDocx } = require('./html-converter');
@@ -60,6 +94,9 @@ async function convertMarkdownToDocx(inputPath, outputDir) {
     const mdDir = path.dirname(path.resolve(inputPath));
     const { children: docxChildren, warnings: htmlWarnings } = convertHTMLToDocx(html, mdDir);
     const warnings = [...(mdWarnings || []), ...(htmlWarnings || [])];
+    if (options.strict && warnings.length) {
+      return { success: false, error_code: 'CONTENT_INCOMPLETE', error: '严格模式拒绝包含内容缺失或降级警告的转换。', warnings };
+    }
 
     // 创建文档
     const doc = new Document({
@@ -87,11 +124,9 @@ async function convertMarkdownToDocx(inputPath, outputDir) {
       fs.mkdirSync(finalOutputDir, { recursive: true });
     }
 
-    const outputPath = resolveUniqueDocxPath(finalOutputDir, baseName);
-
     // 生成并保存文档
     const buffer = await Packer.toBuffer(doc);
-    fs.writeFileSync(outputPath, buffer);
+    const outputPath = writeUniqueDocx(finalOutputDir, baseName, buffer);
 
     const result = {
       success: true,
@@ -134,7 +169,7 @@ async function main() {
   const inputPath = args[0];
   const outputDir = args[1] || '';
 
-  const result = await convertMarkdownToDocx(inputPath, outputDir || null);
+  const result = await convertMarkdownToDocx(inputPath, outputDir || null, { strict: process.env.BRUCE_DOC_CONVERTER_STRICT === '1' });
   console.log(JSON.stringify(result, null, 2));
 
   process.exit(result.success ? 0 : 1);
@@ -146,5 +181,6 @@ if (require.main === module) {
 
 module.exports = {
   convertMarkdownToDocx,
-  resolveUniqueDocxPath
+  resolveUniqueDocxPath,
+  supportedNodeVersion
 };

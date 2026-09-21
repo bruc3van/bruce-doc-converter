@@ -9,6 +9,42 @@ const { convertHTMLToDocx } = require('../bruce_doc_converter/md_to_docx/html-co
 const { buildPuppeteerConfig } = require('../bruce_doc_converter/md_to_docx/mermaid-renderer');
 const { resolveUniqueDocxPath } = require('../bruce_doc_converter/md_to_docx/index');
 
+test('CommonMark keeps underscores, escapes and tilde code fences', async () => {
+  const { html, warnings } = await markdownToHTML('foo_bar_baz \\*literal\\*\n\n~~~js\nconst x = "<tag>";\n~~~');
+  assert.match(html, /foo_bar_baz \*literal\*/);
+  assert.match(html, /<pre><code class="language-js">const x = &quot;&lt;tag&gt;&quot;;<\/code>/);
+  assert.deepEqual(warnings, []);
+});
+
+test('CommonMark preserves inline formatting in links and rejects unsafe links', async () => {
+  const { html } = await markdownToHTML('[**bold**](https://example.com) [bad](javascript:alert%281%29)');
+  assert.match(html, /<a href="https:\/\/example.com"><strong>bold<\/strong><\/a>/);
+  assert.doesNotMatch(html, /href="javascript:/);
+});
+
+test('Mermaid tokens support tilde fences and preserve source on renderer failure', async () => {
+  const renderer = require('../bruce_doc_converter/md_to_docx/mermaid-renderer');
+  const { mock } = require('node:test');
+  try {
+    mock.method(renderer, 'renderMermaidToDataUrl', async () => ({ success: false, error: 'fixture failure' }));
+    const result = await markdownToHTML('~~~mermaid\ngraph TD; A-->B;\n~~~');
+    assert.match(result.html, /language-mermaid/);
+    assert.match(result.html, /A--&gt;B/);
+    assert.match(result.warnings[0], /fixture failure/);
+  } finally {
+    mock.restoreAll();
+  }
+});
+
+test('Node runtime gate rejects unsupported versions', () => {
+  const { supportedNodeVersion } = require('../bruce_doc_converter/md_to_docx/index');
+  assert.equal(supportedNodeVersion('21.7.3'), false);
+  assert.equal(supportedNodeVersion('20.20.0'), false);
+  assert.equal(supportedNodeVersion('22.0.0'), true);
+  assert.equal(supportedNodeVersion('22.18.0'), true);
+  assert.equal(supportedNodeVersion('24.0.0'), true);
+});
+
 function collectDocxText(value) {
   if (typeof value === 'string') return value;
   if (!value || typeof value !== 'object') return '';
@@ -186,9 +222,9 @@ test('原文 HTML 特殊字符被转义，不进入原始标签', async () => {
   assert.doesNotMatch(html, /<script>/);
 });
 
-test('链接属性中的引号被转义', async () => {
+test('链接属性中的引号被 URL 编码', async () => {
   const { html } = await markdownToHTML('[x](https://example.com/a"b)');
-  assert.match(html, /href="https:\/\/example\.com\/a&quot;b"/);
+  assert.match(html, /href="https:\/\/example\.com\/a%22b"/);
 });
 
 test('远程图片无法嵌入时产生 warning', () => {

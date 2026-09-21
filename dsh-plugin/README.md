@@ -59,6 +59,8 @@ dsh --profile web --dump-config | grep -A 2 bruce-doc-converter
 
 模型返回的 Markdown 会被截断到 `maxMarkdownChars` 个字符，完整内容始终写在 `outputPath` 指向的文件里；`doc_batch` 的逐文件明细最多 `maxBatchEntries` 条，超出部分以 `omitted` 计数。
 
+单文件调用在 CLI 端使用 `--content preview`；批量调用使用 `--content none --manifest auto --max-results`，避免全文进入 stdout 后才被裁剪。批量结果的 `manifestPath` 指向完整 JSONL 清单。两个转换工具均支持 `strict: true`，并保留警告与页码/单元格诊断。需要配套支持这些参数的 CLI；旧 CLI 会返回 `BDC_CLI_INCOMPATIBLE` 并提示升级。
+
 ## 配置项
 
 | 字段 | 默认值 | 含义 |
@@ -96,7 +98,7 @@ pnpm run typecheck  # 源码 + 测试
 pnpm test           # 单元测试；本机有 bdc 时还会跑真实 CLI 端到端
 ```
 
-`tests/integration.spec.ts` 会在 `command -v bdc` 失败时自动跳过，因此无 `bdc` 的环境也能跑通。
+`tests/integration.spec.ts` 使用本机 Bash 或 Windows PowerShell 调用真实 `bdc`。本地未安装时跳过；设置 `BDC_REQUIRE_INTEGRATION=1` 后缺少 CLI 会使测试失败，CI 已启用此约束。
 
 发布：
 

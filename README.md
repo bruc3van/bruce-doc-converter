@@ -55,6 +55,34 @@ bdc batch /path/to/documents
 
 CLI 默认向 stdout 输出 JSON，stderr 仅用于进度日志。
 
+### 内容完整性与批量结果
+
+```bash
+# 有内容缺失或降级警告时返回失败，不生成该文件的转换结果
+bdc convert budget.xlsx --strict
+# 仅返回前 4000 个字符；完整正文仍保存在输出文件中
+bdc convert report.docx --content preview --preview-chars 4000
+# 不将正文装入 JSON；完整逐文件明细写入独立 JSONL 清单
+bdc batch ./documents --content none --manifest auto --max-results 200
+# 每完成一个文件即输出一行 JSON，最后输出汇总
+bdc batch ./documents --content none --jsonl --manifest ./results.jsonl
+```
+
+`--content` 支持 `full`（默认，兼容原调用）、`preview`、`none`。
+`markdown_chars` 是完整正文的 Unicode 字符数；预览被截断时 `markdown_truncated` 为 `true`。
+`--max-results` 只限制 stdout 返回的条数，必须同时指定 `--manifest`；`omitted` 表示未返回的条数。
+`--jsonl` 与 `--max-results` 不能同时使用。
+
+清单使用 JSONL：逐文件记录的 `type` 为 `result`，正常结束后附加 `summary`。
+清单逐条刷新；若进程中断，可读取已经完成的记录，没有最终 `summary` 就表示批次未正常结束。
+清单保留所有文件的结果明细，正文是否包含仍遵循 `--content`。
+`--manifest auto` 在指定输出目录或输入根目录的 `Markdown/` 中创建唯一清单；指定文件路径时父目录必须存在，已有文件不会被覆盖。
+
+输出文件采用独占命名和原子写入；每次转换的图片放在独立子目录，重复或并发转换不会改写旧结果。
+Excel 有缓存值的公式使用缓存值；无缓存时保留公式，返回含工作表和单元格位置的 `FORMULA_CACHE_MISSING` 诊断，工具不会计算公式。
+PDF 返回逐页 `diagnostics`，区分 `extracted`、`fallback`、`failed`、`empty`。
+空页和扫描页无法仅凭无文本可靠区分，均会告警；`--strict` 拒绝内容缺失或降级警告，包括空页、公式无缓存、图片无法嵌入、Mermaid 渲染失败。
+
 Markdown 转 Word 需要 Node.js 依赖。首次使用前请显式初始化：
 
 ```bash
@@ -155,7 +183,7 @@ bdc --help-json
 - **表格转换**：智能转换表格为 Markdown 格式
 - **列表支持**：有序列表、无序列表及多级嵌套
 - **Mermaid 图表**：支持通过 `mmdc` 渲染 Mermaid 代码块，嵌入 Word 为 PNG 图片
-- **图片提取**：Office/PDF 转 Markdown 时可提取内嵌图片
+- **图片提取**：Word/Excel/PowerPoint 转 Markdown 时可提取内嵌图片；暂不支持 PDF 图片提取
 
 ## 支持的格式
 
@@ -172,7 +200,10 @@ bdc --help-json
 ## 环境要求
 
 - **Python 3.8+**（必需）
-- **Node.js 14+**（可选，仅 Markdown → Word 需要）
+- **Node.js >=22.0**（可选，仅 Markdown → Word 需要；安装及转换时检查版本）
+
+独立 CLI 的最低版本取决于锁定依赖（其中 `chevrotain` 要求 Node.js >=22.0.0），已在 Node 22.0.0 验证。
+DSH 插件独立遵循其 `^22.19 || >=24` 环境要求，不影响其他 Agent 通过 Skill 调用 CLI。
 
 ## 常见问题
 
@@ -244,6 +275,28 @@ bruce-doc-converter/
     ├── test_convert_document.py
     └── md_to_docx.test.js
 ```
+
+## 开发验证
+
+转换核心按格式拆分到 `bruce_doc_converter/formats/`；`converter.py` 保留调度与既有 Python 入口，`output.py` 管理输出占位和原子写入。
+Markdown 使用 markdown-it 的 CommonMark 解析与表格/删除线扩展，原始 HTML 保持为文本，Mermaid 作为 fence token 渲染。
+
+```bash
+python -m pip install -e . build
+npm ci --ignore-scripts --prefix bruce_doc_converter/md_to_docx
+python -m unittest discover -s tests -p "test_*.py"
+node --test tests/md_to_docx.test.js
+pnpm --dir dsh-plugin install --frozen-lockfile --ignore-scripts
+pnpm --dir dsh-plugin typecheck
+pnpm --dir dsh-plugin test
+python -m build
+python scripts/check_wheel.py
+```
+
+`tests/fixtures/` 包含可重建的合成 Office/PDF 文档和 Markdown 样例。
+测试检查真实 DOCX XML、公式缓存、图片隔离、并发命名及 JSONL 协议。
+CLI 的 CI 配置覆盖 Windows、Linux、macOS，以及 Python 3.8/3.12（macOS 仅 3.12），验证 Node.js 22.0，并在 Linux 额外验证 Node 24。
+DSH 插件单独使用 Node 22.19 测试；真实 CLI 集成测试在 CI 中不允许静默跳过。
 
 ## 许可证
 

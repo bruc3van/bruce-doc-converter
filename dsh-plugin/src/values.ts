@@ -32,6 +32,15 @@ export function inputFormatOf(path: string): string {
 }
 
 /** One conversion outcome, successful or not. */
+const DIAGNOSTIC_SCHEMA = {
+  type: 'object', additionalProperties: false,
+  properties: {
+    code: { type: 'string', required: true }, severity: { type: 'string', required: true },
+    message: { type: 'string', required: true }, page: { type: 'number' },
+    sheet: { type: 'string' }, cell: { type: 'string' }, status: { type: 'string' },
+  },
+} as const
+
 export const CONVERT_VALUE_SCHEMA = {
   type: 'object',
   additionalProperties: false,
@@ -46,6 +55,7 @@ export const CONVERT_VALUE_SCHEMA = {
     markdownTruncated: { type: 'boolean', description: 'Whether `markdown` holds only a prefix of the document.' },
     extractedImages: { type: 'array', items: { type: 'string' }, description: 'Paths of images extracted beside the Markdown.' },
     warnings: { type: 'array', items: { type: 'string' }, required: true, description: 'Non-fatal conversion warnings.' },
+    diagnostics: { type: 'array', items: DIAGNOSTIC_SCHEMA },
     errorCode: { type: 'string', description: 'Machine-readable failure code.' },
     error: { type: 'string', description: 'Human-readable failure detail.' },
     suggestion: { type: 'string', description: 'Recovery guidance from the converter.' },
@@ -64,6 +74,7 @@ export const BATCH_VALUE_SCHEMA = {
   properties: {
     success: { type: 'boolean', required: true, description: 'Whether every file converted.' },
     directory: { type: 'string', required: true, description: 'Directory that was scanned.' },
+    manifestPath: { type: 'string', description: 'JSONL manifest containing every outcome, flushed per file.' },
     total: { type: 'number', description: 'Files the CLI attempted.' },
     succeeded: { type: 'number', description: 'Files that converted.' },
     failed: { type: 'number', description: 'Files that did not convert.' },
@@ -79,6 +90,8 @@ export const BATCH_VALUE_SCHEMA = {
           outputPath: { type: 'string' },
           errorCode: { type: 'string' },
           error: { type: 'string' },
+          warnings: { type: 'array', items: { type: 'string' } },
+          diagnostics: { type: 'array', items: DIAGNOSTIC_SCHEMA },
         },
       },
     },
@@ -139,7 +152,8 @@ export function failureValue(inputPath: string, errorCode: string, error: string
 /** Map one CLI success envelope onto the canonical value, capping the Markdown. */
 export function successValue(envelope: CliConvertSuccess, maxMarkdownChars: number): ConvertValue {
   const markdown = envelope.markdownContent
-  const truncated = markdown !== undefined && markdown.length > maxMarkdownChars
+  const characters = markdown === undefined ? undefined : Array.from(markdown)
+  const truncated = envelope.markdownTruncated === true || (characters !== undefined && characters.length > maxMarkdownChars)
   return {
     success: true,
     inputPath: envelope.inputPath,
@@ -147,8 +161,9 @@ export function successValue(envelope: CliConvertSuccess, maxMarkdownChars: numb
     outputFormat: envelope.outputFormat,
     ...envelope.outputPath === null ? {} : { outputPath: envelope.outputPath },
     warnings: [...envelope.warnings],
-    ...markdown === undefined ? {} : { markdown: truncated ? markdown.slice(0, maxMarkdownChars) : markdown },
-    ...markdown === undefined ? {} : { markdownChars: markdown.length },
+    ...envelope.diagnostics === undefined ? {} : { diagnostics: [...envelope.diagnostics] },
+    ...characters === undefined ? {} : { markdown: characters.slice(0, maxMarkdownChars).join('') },
+    ...characters === undefined ? {} : { markdownChars: envelope.markdownChars ?? characters.length },
     ...truncated ? { markdownTruncated: true } : {},
     ...envelope.extractedImages === undefined ? {} : { extractedImages: [...envelope.extractedImages] },
   }
@@ -166,7 +181,8 @@ export function cliFailureValue(requestedPath: string, envelope: CliFailure): Co
     success: false,
     inputPath: envelope.inputPath ?? requestedPath,
     inputFormat: envelope.inputFormat ?? inputFormatOf(requestedPath),
-    warnings: [],
+    warnings: [...(envelope.warnings ?? [])],
+    ...envelope.diagnostics === undefined ? {} : { diagnostics: [...envelope.diagnostics] },
     errorCode: incompatible ? BDC_CLI_INCOMPATIBLE : envelope.errorCode,
     error: envelope.error,
     ...incompatible
@@ -180,9 +196,11 @@ export function cliFailureValue(requestedPath: string, envelope: CliFailure): Co
 /** Map one CLI batch envelope onto the canonical value, capping the per-file detail. */
 export function batchValue(directory: string, envelope: CliBatchEnvelope, maxEntries: number): BatchValue {
   const included = envelope.results.slice(0, maxEntries)
+  const omitted = (envelope.omitted ?? 0) + envelope.results.length - included.length
   return {
     success: envelope.success,
     directory,
+    ...envelope.manifestPath === undefined ? {} : { manifestPath: envelope.manifestPath },
     total: envelope.total,
     succeeded: envelope.succeeded,
     failed: envelope.failed,
@@ -190,10 +208,14 @@ export function batchValue(directory: string, envelope: CliBatchEnvelope, maxEnt
       ? {
         inputPath: entry.inputPath,
         success: true,
+        warnings: [...entry.result.warnings],
+        ...entry.result.diagnostics === undefined ? {} : { diagnostics: [...entry.result.diagnostics] },
         ...entry.result.outputPath === null ? {} : { outputPath: entry.result.outputPath },
       }
-      : { inputPath: entry.inputPath, success: false, errorCode: entry.result.errorCode, error: entry.result.error }),
-    ...envelope.results.length > included.length ? { omitted: envelope.results.length - included.length } : {},
+      : { inputPath: entry.inputPath, success: false, errorCode: entry.result.errorCode, error: entry.result.error,
+          warnings: [...(entry.result.warnings ?? [])],
+          ...entry.result.diagnostics === undefined ? {} : { diagnostics: [...entry.result.diagnostics] } }),
+    ...omitted > 0 ? { omitted } : {},
   }
 }
 
@@ -235,7 +257,8 @@ export function setupValue(envelope: CliSetupEnvelope): SetupValue {
       ? { errorCode: BDC_CLI_INCOMPATIBLE }
       : envelope.errorCode === undefined ? {} : { errorCode: envelope.errorCode },
     ...envelope.error === undefined ? {} : { error: envelope.error },
-    ...incompatible ? { suggestion: UPGRADE_SUGGESTION } : {},
+    ...incompatible ? { suggestion: UPGRADE_SUGGESTION }
+      : envelope.suggestion === undefined ? {} : { suggestion: envelope.suggestion },
     ...envelope.retryable === undefined ? {} : { retryable: envelope.retryable },
   }
 }
@@ -274,7 +297,7 @@ export function formatSuccess(value: ConvertValue): string {
   if (value.markdown !== undefined) {
     lines.push('', value.markdown)
     if (value.markdownTruncated === true) {
-      lines.push('', `[Markdown truncated after ${value.markdown?.length ?? 0} of ${value.markdownChars ?? 0} characters; the complete document is at ${target}]`)
+      lines.push('', `[Markdown truncated after ${Array.from(value.markdown ?? '').length} of ${value.markdownChars ?? 0} characters; the complete document is at ${target}]`)
     }
   } else if (value.outputPath !== undefined) {
     lines.push('Open the written file to inspect the result.')
@@ -304,7 +327,9 @@ export function formatBatch(value: BatchValue): string {
     lines.push(entry.success
       ? `- ok: ${entry.inputPath} → ${entry.outputPath ?? '(no file written)'}`
       : `- failed: ${entry.inputPath} (${entry.errorCode ?? 'UNKNOWN'}) ${entry.error ?? ''}`.trimEnd())
+    if (entry.warnings?.length) lines.push(`  Warnings: ${entry.warnings.join('; ')}`)
   }
+  if (value.manifestPath !== undefined) lines.push(`Complete manifest: ${value.manifestPath}`)
   lines.push('Markdown bodies are not included in a batch result; call doc_convert for the text of one file.')
   return lines.join('\n')
 }

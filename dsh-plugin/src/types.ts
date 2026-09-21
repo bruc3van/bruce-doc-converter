@@ -8,6 +8,16 @@
 /** Shell dialect used to quote argv for the mounted `ctx.shell` provider. */
 export type ShellDialect = 'posix' | 'powershell'
 
+export interface CliDiagnostic {
+  readonly code: string
+  readonly severity: string
+  readonly message: string
+  readonly page?: number
+  readonly sheet?: string
+  readonly cell?: string
+  readonly status?: string
+}
+
 /**
  * One successful single-file conversion as `bdc convert` reports it. Markdown
  * input produces the DOCX path and `message`; Office/PDF input produces the
@@ -21,6 +31,9 @@ export interface CliConvertSuccess {
   readonly outputFormat: string
   readonly outputPath: string | null
   readonly markdownContent?: string
+  readonly markdownChars?: number
+  readonly markdownTruncated?: boolean
+  readonly diagnostics?: readonly CliDiagnostic[]
   readonly extractedImages?: readonly string[]
   readonly warnings: readonly string[]
   readonly message?: string
@@ -28,6 +41,8 @@ export interface CliConvertSuccess {
 
 /** One failed CLI outcome; the CLI classifies its own errors into `errorCode`. */
 export interface CliFailure {
+  readonly warnings?: readonly string[]
+  readonly diagnostics?: readonly CliDiagnostic[]
   readonly schemaVersion: string | null
   readonly success: false
   readonly inputPath?: string
@@ -50,6 +65,8 @@ export interface CliBatchEntry {
 
 /** One `bdc batch` payload. */
 export interface CliBatchEnvelope {
+  readonly manifestPath?: string
+  readonly omitted?: number
   readonly success: boolean
   readonly total: number
   readonly succeeded: number
@@ -59,6 +76,7 @@ export interface CliBatchEnvelope {
 
 /** One `bdc setup-node` payload. */
 export interface CliSetupEnvelope {
+  readonly suggestion?: string
   readonly success: boolean
   readonly nodeHome?: string
   readonly allowScripts?: boolean

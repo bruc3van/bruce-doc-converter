@@ -653,7 +653,21 @@ function convertList(listElement, level = 0, orderedInstance = null) {
           paragraphs.push(...nestedParagraphs);
           continue;
         }
+        // Loose CommonMark lists contain separate paragraphs in one item.
+        if (tagName === 'P') {
+          if (currentRuns.length) flushRuns(!hasNumberedParagraph);
+          appendParagraph(convertInlineNodes(child.childNodes), !hasNumberedParagraph);
+          continue;
+        }
+        if (tagName === 'PRE' || tagName === 'TABLE' || tagName === 'BLOCKQUOTE') {
+          if (currentRuns.length || !hasNumberedParagraph) flushRuns(!hasNumberedParagraph);
+          const block = convertNode(child);
+          if (block) paragraphs.push(...(Array.isArray(block) ? block : [block]));
+          continue;
+        }
       }
+
+      if (child.nodeType === NODE_TYPE.TEXT_NODE && !child.textContent.trim() && child.textContent.includes('\n')) continue;
 
       currentRuns.push(...convertInlineNodes([child], { skipNestedLists: true }));
     }

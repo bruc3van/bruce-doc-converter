@@ -4,13 +4,17 @@
   "description": "Markdown to DOCX converter for bruce-doc-converter",
   "main": "index.js",
   "type": "commonjs",
+  "engines": {
+    "node": ">=22.0"
+  },
   "scripts": {
     "test": "node --test ../../tests/md_to_docx.test.js"
   },
   "dependencies": {
     "@mermaid-js/mermaid-cli": "^11.12.0",
     "docx": "^9.5.1",
-    "jsdom": "^24.0.0"
+    "jsdom": "^24.0.0",
+    "markdown-it": "14.3.2"
   },
   "overrides": {
     "uuid": "^14.0.0"

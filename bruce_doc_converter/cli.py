@@ -2,10 +2,11 @@ import argparse
 import json
 import os
 import sys
+import tempfile
 from bruce_doc_converter import __version__
 from bruce_doc_converter.converter import (
     SUPPORTED_EXTENSIONS,
-    batch_convert,
+    iter_batch_convert,
     convert_document,
     setup_node_dependencies,
 )
@@ -15,6 +16,7 @@ SCHEMA_VERSION = "1.0"
 SUGGESTIONS = {
     "UNSUPPORTED_FORMAT": "请先转换为 .docx/.xlsx/.pptx 后再重试。",
     "NODE_NOT_FOUND": "请安装 Node.js 后重试 Markdown 到 Word 转换。",
+    "NODE_VERSION_UNSUPPORTED": "请升级到 Node.js >=22.0 后重试。",
     "DEPENDENCY_INSTALL_REQUIRED": "请先运行 bdc setup-node 安装 Markdown 到 Word 所需的 Node.js 依赖。",
     "EMPTY_PDF_CONTENT": "请先对扫描件执行 OCR，或解除 PDF 保护后重试。",
 }
@@ -95,7 +97,7 @@ def _classify_error(error):
     return "CONVERSION_ERROR"
 
 
-def _normalize_single_result(input_path, result):
+def _normalize_single_result(input_path, result, content_mode='full', preview_chars=4000):
     normalized_input = os.path.realpath(os.path.expanduser(str(input_path)))
     input_format = _format_of(normalized_input)
 
@@ -114,7 +116,12 @@ def _normalize_single_result(input_path, result):
         if input_format == "md":
             payload["message"] = result.get("message", "")
         else:
-            payload["markdown_content"] = result.get("markdown_content", "")
+            content = result.get("markdown_content", "")
+            payload['markdown_chars'] = len(content)
+            payload['content_mode'] = content_mode
+            if content_mode != 'none':
+                payload["markdown_content"] = content if content_mode == 'full' else content[:preview_chars]
+                payload['markdown_truncated'] = len(payload['markdown_content']) < len(content)
             payload["extracted_images"] = result.get("extracted_images", [])
         if result.get("warning"):
             payload["warnings"].append(result["warning"])
@@ -126,6 +133,8 @@ def _normalize_single_result(input_path, result):
                 text = item if isinstance(item, str) else str(item)
                 if text and text not in payload["warnings"]:
                     payload["warnings"].append(text)
+        if result.get('diagnostics'):
+            payload['diagnostics'] = result['diagnostics']
         return payload
 
     error = result.get("error", "转换失败")
@@ -143,6 +152,9 @@ def _normalize_single_result(input_path, result):
         payload["suggestion"] = SUGGESTIONS[error_code]
     if error_code in NEXT_COMMANDS:
         payload["next_command"] = NEXT_COMMANDS[error_code]
+    for key in ('warnings', 'diagnostics'):
+        if result.get(key):
+            payload[key] = result[key]
     return payload
 
 
@@ -157,6 +169,14 @@ def _help_payload():
             "setup-node": "Install Node.js dependencies required for Markdown to DOCX conversion.",
         },
         "supported_extensions": SUPPORTED_EXTENSIONS,
+        "options": {
+            "content": {"choices": ["none", "preview", "full"], "default": "full"},
+            "preview_chars": {"default": 4000},
+            "strict": "Reject conversions with content-loss or fallback warnings.",
+            "batch": {"jsonl": "One result per line followed by a summary.",
+                      "manifest": "Exclusive JSONL manifest path, or auto; flushed after each result.",
+                      "max_results": "Cap response entries; requires --manifest. Manifest retains all entries."},
+        },
     }
 
 
@@ -180,11 +200,92 @@ def _build_parser():
     batch_parser.add_argument("--recursive", choices=["true", "false"], default="true")
     batch_parser.add_argument("--extract-images", choices=["true", "false"], default="false")
     batch_parser.add_argument("--mermaid-scale", type=float, default=4.0)
+    for command_parser in (convert_parser, batch_parser):
+        command_parser.add_argument('--content', choices=['none', 'preview', 'full'], default='full')
+        command_parser.add_argument('--preview-chars', type=_nonnegative_int, default=4000)
+        command_parser.add_argument('--strict', action='store_true')
+    batch_parser.add_argument('--manifest', metavar='PATH_OR_AUTO')
+    batch_parser.add_argument('--max-results', type=_nonnegative_int)
+    batch_parser.add_argument('--jsonl', action='store_true')
 
     setup_node_parser = subparsers.add_parser("setup-node", add_help=False)
     setup_node_parser.add_argument("--allow-scripts", action="store_true")
     setup_node_parser.add_argument("--install-browser", action="store_true")
     return parser
+
+
+def _nonnegative_int(value):
+    number = int(value)
+    if number < 0:
+        raise argparse.ArgumentTypeError('must be nonnegative')
+    return number
+
+
+def _run_batch(namespace):
+    if namespace.max_results is not None and not namespace.manifest:
+        return _emit(_usage_error('--max-results requires --manifest to retain all outcomes'), 1)
+    if namespace.jsonl and namespace.max_results is not None:
+        return _emit(_usage_error('--jsonl cannot be combined with --max-results'), 1)
+    output_dir = os.path.realpath(os.path.expanduser(namespace.output_dir)) if namespace.output_dir else None
+    manifest, manifest_path = None, None
+    try:
+        if namespace.manifest == 'auto':
+            directory = os.path.realpath(os.path.expanduser(namespace.directory))
+            if not os.path.exists(directory):
+                return _emit({**_usage_error(f'目录不存在: {directory}'), 'error_code': 'FILE_NOT_FOUND'}, 1)
+            if not os.path.isdir(directory):
+                return _emit({**_usage_error('Batch input must be an existing directory'), 'error_code': 'NOT_A_DIRECTORY'}, 1)
+            destination = output_dir or os.path.join(directory, 'Markdown')
+            os.makedirs(destination, exist_ok=True)
+            fd, manifest_path = tempfile.mkstemp(prefix='bdc-manifest-', suffix='.jsonl', dir=destination)
+            manifest = os.fdopen(fd, 'w', encoding='utf-8')
+        elif namespace.manifest:
+            manifest_path = os.path.realpath(os.path.expanduser(namespace.manifest))
+            # Never overwrite a document, input, or previous manifest.
+            manifest = open(manifest_path, 'x', encoding='utf-8')
+
+        def record(value):
+            line = json.dumps(value, ensure_ascii=False)
+            if manifest:
+                manifest.write(line + '\n')
+                manifest.flush()
+            if namespace.jsonl:
+                print(line, flush=True)
+
+        results, total, succeeded = [], 0, 0
+        for item in iter_batch_convert(namespace.directory, recursive=namespace.recursive == 'true',
+                                       extract_images=namespace.extract_images == 'true', output_dir=output_dir,
+                                       mermaid_scale=namespace.mermaid_scale, strict=namespace.strict):
+            result = _normalize_single_result(item['file'], item['result'], namespace.content, namespace.preview_chars)
+            entry = {'input_path': result['input_path'], 'result': result}
+            total += 1
+            succeeded += int(result['success'])
+            record({'type': 'result', **entry})
+            if not namespace.jsonl and (namespace.max_results is None or len(results) < namespace.max_results):
+                results.append(entry)
+        summary = {'schema_version': SCHEMA_VERSION, 'success': total == succeeded,
+                   'total': total, 'succeeded': succeeded, 'failed': total - succeeded}
+        if manifest_path:
+            summary['manifest_path'] = manifest_path
+        record({'type': 'summary', **summary})
+        if namespace.jsonl:
+            return 0 if summary['success'] else 1
+        summary['results'] = results
+        if total > len(results):
+            summary['omitted'] = total - len(results)
+        return _emit(summary, 0 if summary['success'] else 1)
+    except OSError as exc:
+        payload = {'schema_version': SCHEMA_VERSION, 'success': False,
+                   'error_code': 'BATCH_IO_ERROR', 'error': str(exc), 'retryable': False}
+        if manifest and manifest_path:
+            payload['manifest_path'] = manifest_path
+        if namespace.jsonl:
+            print(json.dumps({'type': 'error', **payload}, ensure_ascii=False), flush=True)
+            return 1
+        return _emit(payload, 1)
+    finally:
+        if manifest:
+            manifest.close()
 
 
 def main(argv=None):
@@ -205,37 +306,13 @@ def main(argv=None):
             extract_images=namespace.extract_images == "true",
             output_dir=output_dir,
             mermaid_scale=namespace.mermaid_scale,
+            strict=namespace.strict,
         )
-        payload = _normalize_single_result(namespace.file, result)
+        payload = _normalize_single_result(namespace.file, result, namespace.content, namespace.preview_chars)
         return _emit(payload, 0 if payload["success"] else 1)
 
     if namespace.command == "batch":
-        output_dir = os.path.realpath(os.path.expanduser(namespace.output_dir)) if namespace.output_dir else None
-        raw_results = batch_convert(
-            namespace.directory,
-            recursive=namespace.recursive == "true",
-            extract_images=namespace.extract_images == "true",
-            output_dir=output_dir,
-            mermaid_scale=namespace.mermaid_scale,
-        )
-        results = []
-        for item in raw_results:
-            result_payload = _normalize_single_result(item["file"], item["result"])
-            results.append({
-                "input_path": result_payload["input_path"],
-                "result": result_payload,
-            })
-        succeeded = sum(1 for item in results if item["result"]["success"])
-        total = len(results)
-        payload = {
-            "schema_version": SCHEMA_VERSION,
-            "success": succeeded == total,
-            "total": total,
-            "succeeded": succeeded,
-            "failed": total - succeeded,
-            "results": results,
-        }
-        return _emit(payload, 0 if payload["success"] else 1)
+        return _run_batch(namespace)
 
     if namespace.command == "setup-node":
         payload = setup_node_dependencies(
@@ -245,6 +322,8 @@ def main(argv=None):
         payload = {"schema_version": SCHEMA_VERSION, **payload}
         if not payload["success"]:
             payload.setdefault("retryable", False)
+            if payload.get('error_code') in SUGGESTIONS:
+                payload.setdefault('suggestion', SUGGESTIONS[payload['error_code']])
         return _emit(payload, 0 if payload["success"] else 1)
 
     return _emit(_usage_error("缺少命令。可用命令: convert, batch, setup-node"), 1)
