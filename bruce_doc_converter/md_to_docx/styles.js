@@ -5,6 +5,13 @@
 
 const { AlignmentType, BorderStyle, TabStopType } = require('docx');
 
+// A4 纵向，单位 twips
+const PAGE_WIDTH = 11906;
+const PAGE_HEIGHT = 16838;
+const MARGIN = 1417;  // 2.5cm
+// 图片最大显示高度（96 DPI 像素），为段落间距和表格单元格内边距留出余量
+const MAX_IMAGE_HEIGHT = 740;
+
 /**
  * 将字符数转换为 twips (用于缩进)
  * @param {number} chars - 字符数
@@ -33,12 +40,41 @@ function createStyles() {
             line: 360  // 1.5倍行距
           },
           indent: {
-            firstLine: charsToTwips(2)  // 首行缩进2字符
+            firstLine: 0  // 首行缩进仅由正文样式应用，避免污染列表、图片和表格
           }
         }
       }
     },
     paragraphStyles: [
+      {
+        id: "BodyText",
+        name: "Body Text",
+        basedOn: "Normal",
+        next: "BodyText",
+        paragraph: {
+          indent: {
+            firstLine: charsToTwips(2)  // 正文首行缩进2字符
+          }
+        }
+      },
+      {
+        id: "FootnoteText",
+        name: "Footnote Text",
+        basedOn: "Normal",
+        next: "FootnoteText",
+        run: {
+          size: 20  // 10pt
+        },
+        paragraph: {
+          indent: {
+            firstLine: 0
+          },
+          spacing: {
+            line: 240,
+            after: 80
+          }
+        }
+      },
       {
         id: "Heading1",
         name: "Heading 1",
@@ -295,10 +331,10 @@ function createStyles() {
  */
 function createMargins() {
   return {
-    top: 1417,     // 2.5cm
-    bottom: 1417,  // 2.5cm
-    left: 1417,    // 2.5cm
-    right: 1417    // 2.5cm
+    top: MARGIN,
+    bottom: MARGIN,
+    left: MARGIN,
+    right: MARGIN
   };
 }
 
@@ -440,6 +476,10 @@ function createNumbering() {
 }
 
 module.exports = {
+  PAGE_WIDTH,
+  PAGE_HEIGHT,
+  MARGIN,
+  MAX_IMAGE_HEIGHT,
   createStyles,
   createNumbering,
   createMargins,

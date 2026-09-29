@@ -75,6 +75,8 @@ async function convertMarkdownToDocx(inputPath, outputDir, options = {}) {
     const { markdownToHTML } = require('./markdown-converter');
     const { convertHTMLToDocx } = require('./html-converter');
     const { createStyles, createNumbering, createMargins } = require('./styles');
+    const { Diagnostics } = require('./diagnostics');
+    const { validateDocx } = require('./docx-validate');
 
     // 验证输入文件
     if (!fs.existsSync(inputPath)) {
@@ -87,21 +89,27 @@ async function convertMarkdownToDocx(inputPath, outputDir, options = {}) {
       markdown = markdown.slice(1);
     }
 
-    // Markdown -> HTML
-    const { html, warnings: mdWarnings } = await markdownToHTML(markdown);
+    // Markdown -> HTML，两阶段共享同一份诊断
+    const diagnostics = new Diagnostics();
+    const { html, formulas } = await markdownToHTML(markdown, diagnostics);
 
     // HTML -> DOCX 组件（传入 Markdown 文件所在目录，用于解析相对路径图片）
     const mdDir = path.dirname(path.resolve(inputPath));
-    const { children: docxChildren, warnings: htmlWarnings } = convertHTMLToDocx(html, mdDir);
-    const warnings = [...(mdWarnings || []), ...(htmlWarnings || [])];
+    const { children: docxChildren, footnotes, updateFields } = convertHTMLToDocx(html, mdDir, { formulas, diagnostics });
+    // 只有 warning 级诊断（内容缺失或降级）进入 warnings 并阻止严格导出；info 仅作提示
+    const warnings = diagnostics.warnings();
+    const diagnosticItems = diagnostics.items;
     if (options.strict && warnings.length) {
-      return { success: false, error_code: 'CONTENT_INCOMPLETE', error: '严格模式拒绝包含内容缺失或降级警告的转换。', warnings };
+      return { success: false, error_code: 'CONTENT_INCOMPLETE', error: '严格模式拒绝包含内容缺失或降级警告的转换。', warnings, diagnostics: diagnosticItems };
     }
 
     // 创建文档
     const doc = new Document({
       styles: createStyles(),
       numbering: createNumbering(),
+      footnotes,
+      // 重复引用同一脚注时使用 NOTEREF 域，打开时请求更新
+      ...(updateFields ? { features: { updateFields: true } } : {}),
       sections: [{
         properties: { page: { margin: createMargins() } },
         children: docxChildren
@@ -126,6 +134,11 @@ async function convertMarkdownToDocx(inputPath, outputDir, options = {}) {
 
     // 生成并保存文档
     const buffer = await Packer.toBuffer(doc);
+    try {
+      await validateDocx(buffer);
+    } catch (error) {
+      return { success: false, error_code: 'NODE_CONVERSION_FAILED', error: `生成的 DOCX 未通过完整性校验: ${error.message}` };
+    }
     const outputPath = writeUniqueDocx(finalOutputDir, baseName, buffer);
 
     const result = {
@@ -135,6 +148,9 @@ async function convertMarkdownToDocx(inputPath, outputDir, options = {}) {
     };
     if (warnings.length > 0) {
       result.warnings = warnings;
+    }
+    if (diagnosticItems.length > 0) {
+      result.diagnostics = diagnosticItems;
     }
     return result;
 

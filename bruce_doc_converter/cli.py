@@ -158,11 +158,56 @@ def _normalize_single_result(input_path, result, content_mode='full', preview_ch
     return payload
 
 
+PACKAGE_NAME = "bruce-doc-converter"
+
+
+def _install_info(executable=None, prefix=None, base_prefix=None, module_file=None, user_site=None):
+    """Describe how this CLI was installed so agents can pick a safe upgrade path.
+
+    auto_upgrade is true only for isolated tool installs owned by the user
+    (pipx, uv tool, pip --user). Project venvs, system Python and source
+    checkouts are left to the user.
+    """
+    executable = executable or sys.executable
+    prefix = prefix if prefix is not None else sys.prefix
+    base_prefix = base_prefix if base_prefix is not None else getattr(sys, "base_prefix", sys.prefix)
+    module_file = module_file or os.path.abspath(__file__)
+    if user_site is None:
+        try:
+            import site
+            user_site = site.getusersitepackages()
+        except Exception:
+            user_site = ""
+    module_path = module_file.replace("\\", "/").lower()
+    quoted_python = f'"{executable}"'
+
+    # pipx and uv mark their tool environments, which also covers custom PIPX_HOME / UV_TOOL_DIR.
+    if "/site-packages/" not in module_path and "/dist-packages/" not in module_path:
+        source, command = "source", None
+    elif os.path.isfile(os.path.join(prefix, "pipx_metadata.json")):
+        source, command = "pipx", f"pipx upgrade {PACKAGE_NAME}"
+    elif os.path.isfile(os.path.join(prefix, "uv-receipt.toml")):
+        source, command = "uv", f"uv tool upgrade {PACKAGE_NAME}"
+    elif os.path.normcase(os.path.realpath(prefix)) != os.path.normcase(os.path.realpath(base_prefix)):
+        source, command = "venv", f"{quoted_python} -m pip install --upgrade {PACKAGE_NAME}"
+    elif user_site and module_path.startswith(user_site.replace("\\", "/").lower().rstrip("/") + "/"):
+        source, command = "user", f"{quoted_python} -m pip install --user --upgrade {PACKAGE_NAME}"
+    else:
+        source, command = "system", None
+    return {
+        "source": source,
+        "python": executable,
+        "upgrade_command": command,
+        "auto_upgrade": source in ("pipx", "uv", "user"),
+    }
+
+
 def _help_payload():
     return {
         "schema_version": SCHEMA_VERSION,
         "success": True,
         "cli_version": __version__,
+        "install": _install_info(),
         "commands": {
             "convert": "Convert one .docx/.xlsx/.pptx/.pdf file to Markdown, or one .md file to DOCX.",
             "batch": "Convert supported files in a directory.",
@@ -185,6 +230,7 @@ def _build_parser():
     # Use --help-json for machine-readable help instead.
     parser = _JsonArgumentParser(prog="bdc", add_help=False)
     parser.add_argument("--help-json", action="store_true")
+    parser.add_argument("--version", action="store_true")
     subparsers = parser.add_subparsers(dest="command")
 
     # Subparsers inherit _JsonArgumentParser because type(parser) is _JsonArgumentParser
@@ -298,6 +344,11 @@ def main(argv=None):
 
     if namespace.help_json:
         return _emit(_help_payload(), 0)
+
+    if namespace.version:
+        # A single line, like other CLIs, for quick version checks.
+        print(__version__)
+        return 0
 
     if namespace.command == "convert":
         output_dir = os.path.realpath(os.path.expanduser(namespace.output_dir)) if namespace.output_dir else None

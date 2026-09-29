@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "bruce-doc-converter"
-version = "0.2.1"
+version = "0.2.2"
 description = "Agent-facing document converter CLI for Office/PDF/Markdown workflows"
 readme = "README.md"
 requires-python = ">=3.8"

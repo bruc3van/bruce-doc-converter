@@ -7,7 +7,9 @@ with ZipFile(wheel) as archive:
     names = set(archive.namelist())
     for relative in ['output.py', 'formats/common.py', 'formats/images.py', 'formats/docx.py',
                      'formats/xlsx.py', 'formats/pptx.py', 'formats/pdf.py',
-                     'md_to_docx/markdown-converter.js', 'md_to_docx/package-lock.json']:
+                     'md_to_docx/markdown-converter.js', 'md_to_docx/html-converter.js',
+                     'md_to_docx/diagnostics.js', 'md_to_docx/layout.js', 'md_to_docx/math.js',
+                     'md_to_docx/docx-validate.js', 'md_to_docx/package-lock.json']:
         assert 'bruce_doc_converter/' + relative in names, relative
     assert not any('/node_modules/' in name for name in names), 'wheel contains node_modules'
 print('Verified wheel contents:', wheel.name)

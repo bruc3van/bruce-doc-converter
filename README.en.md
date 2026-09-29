@@ -82,11 +82,14 @@ bdc setup-node --allow-scripts --install-browser
 
 `bdc setup-node` is idempotent: if the shared dependency directory already matches the installed package, it skips reinstalling Node dependencies. Recoverable failures include `retryable` and `next_command` JSON fields; agents should prefer those machine-readable fields for remediation.
 
-Get help:
+Get help and the version:
 
 ```bash
 bdc --help-json
+bdc --version
 ```
+
+The `install` field of `--help-json` reports how the CLI was installed (`pipx`, `uv`, `user`, `venv`, `system` or a `source` checkout) and the matching `upgrade_command`. When `auto_upgrade` is `true`, the Skill guides agents to upgrade after finding a newer release and report the version change; project venvs, system Python and source checkouts are only reported, never upgraded automatically.
 
 ### Success output (single file)
 
@@ -155,6 +158,9 @@ For batch conversion, `success` means every file converted successfully. If only
 - **Table conversion**: Converts tables to clean Markdown
 - **List support**: Ordered, unordered, and nested lists
 - **Mermaid diagrams**: Renders Mermaid code blocks via `mmdc` and embeds them as PNG images in Word
+- **Math formulas**: In Markdown to Word, inline `$...$` / `\(...\)` and block `$$...$$` / `\[...\]` formulas become editable native Word equations; unsupported formulas keep their source and warn
+- **Footnotes and in-document links**: `[^label]` becomes a native Word footnote; `[text](#heading)` links jump to the matching heading
+- **CJK-aware layout**: Source line breaks between CJK characters no longer insert spaces; tables get content-based fixed column widths and keep Markdown alignment; images keep their natural size within the text area
 - **Image extraction**: Extracts embedded images from Word/Excel/PowerPoint; PDF image extraction is not supported
 
 ## Supported Formats
@@ -232,7 +238,8 @@ The plugin builds the argv and runs it through `ctx.shell`, so sandboxing, appro
 ```
 bruce-doc-converter/
 ├── bruce-doc-converter-skill/
-│   └── SKILL.md                  # Agent Skill definition
+│   ├── SKILL.md                  # Agent Skill definition
+│   └── references/               # Install/update, diagnostics and error codes
 ├── dsh-plugin/                   # DeepSeek Harness plugin (npm: bruce-doc-converter-dsh)
 │   ├── src/                      # Tools, runner, envelope validation, embedded skill
 │   ├── tests/                    # Unit tests plus real-CLI end-to-end tests
@@ -283,12 +290,22 @@ solely by lack of text, so both warn. Strict mode rejects content-loss/fallback
 warnings, including missing formula caches, empty pages and failed image/Mermaid
 embedding, without writing that conversion's output.
 
+Markdown to Word also returns `diagnostics` (`code`, `severity`, `message`, plus
+a source `line` when known), such as `MATH_NOT_CONVERTED`, `FOOTNOTE_UNDEFINED`,
+`LINK_UNAVAILABLE`, `IMAGE_UNAVAILABLE` and `MERMAID_NOT_RENDERED`. Diagnostics
+with severity `warning` are also listed in `warnings` and rejected by strict
+mode; `info` diagnostics (such as an unreferenced footnote) are advisory. The
+generated DOCX package and XML are validated before writing.
+
 ## Development checks
 
 Format extractors live in `bruce_doc_converter/formats/`; `converter.py` retains
 the existing Python entry points and orchestration. `output.py` owns exclusive
 reservation and atomic writes. Markdown uses markdown-it CommonMark parsing with
-tables/strikethrough, literal raw HTML and Mermaid fence rendering.
+tables/strikethrough, literal raw HTML and Mermaid fence rendering. Formulas go
+through Temml MathML to Word OMML and footnotes use markdown-it-footnote; this
+part, table column widths and nested layout are adapted from the sibling project
+[bruce-md2word](https://github.com/bruc3van/bruce-md2word).
 
 ```bash
 python -m pip install -e . build

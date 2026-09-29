@@ -287,3 +287,179 @@ test('HTML 转 DOCX 只允许读取 Markdown 目录内的相对图片', () => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 });
+
+// ---- 端到端：Markdown -> 打包后的 DOCX XML ----
+
+// Resolve packages exactly as the converter does, so docx classes are the same instances.
+const converterRequire = require('node:module').createRequire(require.resolve('../bruce_doc_converter/md_to_docx/index'));
+const JSZip = converterRequire('jszip');
+const { Document, Packer } = converterRequire('docx');
+const { createStyles, createNumbering, createMargins } = require('../bruce_doc_converter/md_to_docx/styles');
+const { Diagnostics } = require('../bruce_doc_converter/md_to_docx/diagnostics');
+const { validateDocx } = require('../bruce_doc_converter/md_to_docx/docx-validate');
+const { convertMarkdownToDocx } = require('../bruce_doc_converter/md_to_docx/index');
+
+async function mdToXml(markdown, basePath = process.cwd()) {
+  const diagnostics = new Diagnostics();
+  const { html, formulas } = await markdownToHTML(markdown, diagnostics);
+  const { children, footnotes } = convertHTMLToDocx(html, basePath, { formulas, diagnostics });
+  const doc = new Document({
+    styles: createStyles(), numbering: createNumbering(), footnotes,
+    sections: [{ properties: { page: { margin: createMargins() } }, children }]
+  });
+  const buffer = await Packer.toBuffer(doc);
+  const zip = await JSZip.loadAsync(buffer);
+  const read = async (name) => (zip.file(name) ? zip.file(name).async('string') : '');
+  return { xml: await read('word/document.xml'), footnotesXml: await read('word/footnotes.xml'), diagnostics: diagnostics.items, buffer };
+}
+const plainText = (xml) => xml.replace(/<\/w:p>/g, '\n').replace(/<[^>]+>/g, '');
+const codes = (items) => items.map(item => item.code);
+
+test('中文源文件换行不插入空格，英文换行保留词间空格', async () => {
+  const { xml } = await mdToXml('第一行中文\n第二行中文。English line\ncontinues here.');
+  assert.match(plainText(xml), /第一行中文第二行中文。English line continues here\./);
+});
+
+test('LaTeX 公式转换为 Word 原生公式，金额不误判为公式', async () => {
+  const { xml, diagnostics } = await mdToXml([
+    '公式 $E=mc^2$，价格 $5 and $10。',
+    '',
+    '$$',
+    String.raw`\begin{pmatrix} 1 & 0 \\ 0 & 1 \end{pmatrix}`,
+    '$$'
+  ].join('\n'));
+  assert.equal((xml.match(/<m:oMath>/g) || []).length, 2);
+  assert.equal((xml.match(/<m:oMathPara>/g) || []).length, 1);
+  assert.equal((xml.match(/<m:mr>/g) || []).length, 2, '矩阵应保留两行');
+  assert.match(plainText(xml), /价格 \$5 and \$10/);
+  assert.deepEqual(diagnostics, []);
+});
+
+test('不支持的公式保留源码并报告带行号的诊断', async () => {
+  const { xml, diagnostics } = await mdToXml(String.raw`第一行
+
+坏公式 $\color{red}{x}$`);
+  assert.ok(plainText(xml).includes(String.raw`[公式未转换] $\color{red}{x}$`));
+  assert.deepEqual(diagnostics.map(d => [d.code, d.severity, d.line]), [['MATH_NOT_CONVERTED', 'warning', 3]]);
+});
+
+test('脚注生成 Word 原生脚注，重复引用使用 NOTEREF，定义内容不丢失', async () => {
+  const { xml, footnotesXml, diagnostics } = await mdToXml('正文[^n]，再次[^n]。\n\n[^n]: 脚注 **内容**。\n\n    第二段。');
+  assert.equal((xml.match(/<w:footnoteReference /g) || []).length, 1);
+  assert.match(xml, /NOTEREF note_1/);
+  assert.match(plainText(footnotesXml), /脚注 内容。/);
+  assert.match(plainText(footnotesXml), /第二段。/);
+  assert.doesNotMatch(plainText(xml), /\^n/);
+  assert.deepEqual(diagnostics, []);
+});
+
+test('未定义与未引用的脚注保留原文并分级报告', async () => {
+  const { xml, diagnostics } = await mdToXml('正文[^missing]。\n\n[^orphan]: 未引用。');
+  assert.match(plainText(xml), /正文\[\^missing\]。/);
+  assert.match(plainText(xml), /未引用。/);
+  assert.deepEqual(diagnostics.map(d => [d.code, d.severity]).sort(), [['FOOTNOTE_UNDEFINED', 'warning'], ['FOOTNOTE_UNUSED', 'info']]);
+});
+
+test('文档内链接跳转到标题书签，缺失目标保留文字并报告', async () => {
+  const { xml, diagnostics } = await mdToXml('# 概述\n\n见[概述](#概述)与[缺失](#不存在)。');
+  assert.match(xml, /<w:bookmarkStart w:name="heading_1" w:id="\d+"\/>/);
+  assert.match(xml, /<w:hyperlink [^>]*w:anchor="heading_1"/);
+  assert.deepEqual(diagnostics.map(d => [d.code, d.line]), [['LINK_UNAVAILABLE', 3]]);
+  assert.match(diagnostics[0].message, /#不存在/);
+});
+
+test('引用块内的列表保持列表结构和引用样式', async () => {
+  const { xml } = await mdToXml('> 引用段落\n>\n> - 列表一\n> - 列表二');
+  const paragraphs = xml.split('</w:p>').filter(p => /列表[一二]/.test(p));
+  assert.equal(paragraphs.length, 2, '列表项不应被合并为一段');
+  for (const p of paragraphs) {
+    assert.match(p, /<w:pStyle w:val="Quote"\/>/);
+    assert.match(p, /<w:numPr>/);
+  }
+});
+
+test('表格使用按内容估算的固定列宽并保留对齐方式，相邻表格不合并', async () => {
+  const { xml } = await mdToXml([
+    '| 编号 | 状态 | 说明 |', '| :--- | :---: | ---: |', '| A-01 | 完成 | 这是一段相当长的说明文字，用于测试列宽分配 |',
+    '', '| 第二张表 | x |', '| --- | --- |', '| 1 | 2 |'
+  ].join('\n'));
+  const first = xml.split('</w:tbl>')[0];
+  const widths = [...first.matchAll(/<w:gridCol w:w="(\d+)"\/>/g)].map(m => Number(m[1]));
+  assert.equal(widths.reduce((a, b) => a + b, 0), 11906 - 1417 * 2);
+  assert.ok(widths[2] > widths[0] && widths[2] > widths[1], '长说明列应更宽');
+  assert.match(first, /<w:tblLayout w:type="fixed"\/>/);
+  const bodyRow = first.split('<w:tr>').pop();
+  assert.deepEqual([...bodyRow.matchAll(/<w:jc w:val="(\w+)"\/>/g)].map(m => m[1]), ['left', 'center', 'right']);
+  assert.match(xml, /<\/w:tbl><w:p>((?!<w:tbl>).)*<\/w:p><w:tbl>/s, '相邻表格之间应有分隔段落');
+});
+
+test('正文首行缩进只作用于正文段落，列表和标题不继承', async () => {
+  const { xml } = await mdToXml('# 标题\n\n正文段落。\n\n- 列表项');
+  const body = xml.split('</w:p>').find(p => p.includes('正文段落'));
+  const item = xml.split('</w:p>').find(p => p.includes('列表项'));
+  assert.match(body, /<w:pStyle w:val="BodyText"\/>/);
+  assert.doesNotMatch(item, /BodyText|w:firstLine="[1-9]/);
+});
+
+test('图片按自然尺寸显示，不放大小图，超高图片按页面高度缩小', async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bdc-image-size-'));
+  try {
+    const png = (width, height) => {
+      const header = Buffer.alloc(33);
+      Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex').copy(header);
+      header.writeUInt32BE(width, 16);
+      header.writeUInt32BE(height, 20);
+      return header;
+    };
+    fs.writeFileSync(path.join(tmpDir, 'small.png'), png(32, 16));
+    fs.writeFileSync(path.join(tmpDir, 'tall.png'), png(400, 4000));
+    const { xml } = await mdToXml('![s](small.png)\n\n![t](tall.png)', tmpDir);
+    // 96 DPI 像素 -> EMU
+    const extents = [...xml.matchAll(/<wp:extent cx="(\d+)" cy="(\d+)"\/>/g)].map(m => [Number(m[1]) / 9525, Number(m[2]) / 9525]);
+    assert.deepEqual(extents[0], [32, 16]);
+    assert.ok(extents[1][1] <= 740, `超高图片应按页面高度缩小: ${extents[1]}`);
+    assert.equal(extents[1][0], Math.round(extents[1][1] / 10));
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('DOCX 完整性校验接受正常输出并拒绝损坏的包', async () => {
+  const { buffer } = await mdToXml('# 标题\n\n正文[^a]\n\n[^a]: 注。');
+  await validateDocx(buffer);
+  const zip = await JSZip.loadAsync(buffer);
+  zip.file('word/document.xml', '<w:document><broken></w:document>');
+  await assert.rejects(validateDocx(await zip.generateAsync({ type: 'nodebuffer' })));
+  zip.remove('word/document.xml');
+  await assert.rejects(validateDocx(await zip.generateAsync({ type: 'nodebuffer' })), /document\.xml/);
+});
+
+test('严格模式只拒绝 warning 级诊断，info 级不阻止导出', async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bdc-strict-'));
+  try {
+    const infoOnly = path.join(tmpDir, 'info.md');
+    const degraded = path.join(tmpDir, 'degraded.md');
+    fs.writeFileSync(infoOnly, '正文。\n\n[^orphan]: 未引用。');
+    fs.writeFileSync(degraded, String.raw`坏公式 $\color{red}{x}$`);
+    const ok = await convertMarkdownToDocx(infoOnly, tmpDir, { strict: true });
+    assert.equal(ok.success, true, JSON.stringify(ok));
+    assert.equal(ok.warnings, undefined);
+    assert.deepEqual(codes(ok.diagnostics), ['FOOTNOTE_UNUSED']);
+    const rejected = await convertMarkdownToDocx(degraded, tmpDir, { strict: true });
+    assert.equal(rejected.error_code, 'CONTENT_INCOMPLETE');
+    assert.deepEqual(codes(rejected.diagnostics), ['MATH_NOT_CONVERTED']);
+    assert.match(rejected.warnings[0], /第 1 行/);
+    assert.equal(fs.readdirSync(tmpDir).filter(name => name.startsWith('degraded')).length, 1, '只应存在源 Markdown');
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('诊断数量有上限且截断时保留阻断级别', () => {
+  const diagnostics = new Diagnostics(2);
+  diagnostics.add('A', 'a', 'info');
+  diagnostics.add('B', 'b', 'info');
+  diagnostics.add('C', 'c', 'warning');
+  assert.equal(diagnostics.items.length, 2);
+  assert.deepEqual(diagnostics.items[1], { code: 'DIAGNOSTICS_TRUNCATED', severity: 'warning', message: '另有 2 条诊断被省略。' });
+});

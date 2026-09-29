@@ -16,6 +16,7 @@ from pptx import Presentation
 from pptx.util import Inches
 
 from bruce_doc_converter.converter import (
+    NODE_RUNTIME_PACKAGES,
     _detect_image_format,
     _extract_pdf_page_blocks,
     _get_image_dimensions,
@@ -582,9 +583,8 @@ class ConvertDocumentTests(unittest.TestCase):
             shutil.copy2(source_dir / "package-lock.json", shared_dir / "package-lock.json")
             (bin_dir / "mmdc").write_text("#!/bin/sh\n", encoding="utf-8")
             (bin_dir / "mmdc.cmd").write_text("@echo off\n", encoding="utf-8")
-            (shared_dir / "node_modules" / "docx").mkdir()
-            (shared_dir / "node_modules" / "jsdom").mkdir()
-            (shared_dir / "node_modules" / "markdown-it").mkdir()
+            for package in NODE_RUNTIME_PACKAGES:
+                (shared_dir / "node_modules" / package).mkdir()
             (shared_dir / "node_modules" / "@mermaid-js" / "mermaid-cli").mkdir(parents=True)
 
             with patch("bruce_doc_converter.converter._get_node_shared_root", return_value=tmp_dir):
@@ -612,9 +612,8 @@ class ConvertDocumentTests(unittest.TestCase):
             shutil.copy2(source_dir / "package-lock.json", shared_dir / "package-lock.json")
             (bin_dir / "mmdc").write_text("#!/bin/sh\n", encoding="utf-8")
             (bin_dir / "mmdc.cmd").write_text("@echo off\n", encoding="utf-8")
-            (shared_dir / "node_modules" / "docx").mkdir()
-            (shared_dir / "node_modules" / "jsdom").mkdir()
-            (shared_dir / "node_modules" / "markdown-it").mkdir()
+            for package in NODE_RUNTIME_PACKAGES:
+                (shared_dir / "node_modules" / package).mkdir()
             (shared_dir / "node_modules" / "@mermaid-js" / "mermaid-cli").mkdir(parents=True)
 
             with patch("bruce_doc_converter.converter._get_node_shared_root", return_value=tmp_dir):

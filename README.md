@@ -82,6 +82,7 @@ bdc batch ./documents --content none --jsonl --manifest ./results.jsonl
 Excel 有缓存值的公式使用缓存值；无缓存时保留公式，返回含工作表和单元格位置的 `FORMULA_CACHE_MISSING` 诊断，工具不会计算公式。
 PDF 返回逐页 `diagnostics`，区分 `extracted`、`fallback`、`failed`、`empty`。
 空页和扫描页无法仅凭无文本可靠区分，均会告警；`--strict` 拒绝内容缺失或降级警告，包括空页、公式无缓存、图片无法嵌入、Mermaid 渲染失败。
+Markdown 转 Word 同样返回 `diagnostics`（`code`、`severity`、`message`，可定位时附 `line` 源文件行号），如 `MATH_NOT_CONVERTED`、`FOOTNOTE_UNDEFINED`、`LINK_UNAVAILABLE`、`IMAGE_UNAVAILABLE`、`MERMAID_NOT_RENDERED`。`severity` 为 `warning` 的诊断同时出现在 `warnings` 中并被 `--strict` 拒绝；`info`（如未被引用的脚注）只作提示。生成的 DOCX 在写出前会校验压缩包与 XML 完整性。
 
 Markdown 转 Word 需要 Node.js 依赖。首次使用前请显式初始化：
 
@@ -110,11 +111,14 @@ bdc setup-node --allow-scripts --install-browser
 
 `bdc setup-node` 是幂等命令：如果共享依赖目录已经和当前发布包匹配，会跳过 Node 依赖重装。可恢复失败会在 JSON 中提供 `retryable` 和 `next_command` 字段，智能体应优先使用这些机器字段决定下一步。
 
-查看帮助：
+查看帮助与版本：
 
 ```bash
 bdc --help-json
+bdc --version
 ```
+
+`--help-json` 中的 `install` 字段说明 CLI 的安装方式（`pipx`、`uv`、`user`、`venv`、`system` 或源码 `source`）及对应的 `upgrade_command`；`auto_upgrade` 为 `true` 时，Skill 会引导智能体在发现新版本后自动升级并告知版本变化，项目 venv、系统 Python 和源码目录只提示、不擅自升级。
 
 ### 输出示例（单文件成功）
 
@@ -183,6 +187,9 @@ bdc --help-json
 - **表格转换**：智能转换表格为 Markdown 格式
 - **列表支持**：有序列表、无序列表及多级嵌套
 - **Mermaid 图表**：支持通过 `mmdc` 渲染 Mermaid 代码块，嵌入 Word 为 PNG 图片
+- **数学公式**：Markdown 转 Word 时，`$...$`、`\(...\)` 行内公式和 `$$...$$`、`\[...\]` 块公式转换为可编辑的 Word 原生公式；不支持的公式保留源码并告警
+- **脚注与文档内跳转**：`[^名称]` 生成 Word 原生脚注；`[文字](#标题)` 生成跳转到对应标题的内部链接
+- **中文排版**：中文源文件中的换行不再插入多余空格；表格按内容分配固定列宽并保留 Markdown 对齐方式；图片按自然尺寸显示并限制在版心内
 - **图片提取**：Word/Excel/PowerPoint 转 Markdown 时可提取内嵌图片；暂不支持 PDF 图片提取
 
 ## 支持的格式
@@ -258,7 +265,8 @@ dsh plugin --profile web add bruce-doc-converter-dsh
 ```
 bruce-doc-converter/
 ├── bruce-doc-converter-skill/
-│   └── SKILL.md                  # Agent Skill 定义
+│   ├── SKILL.md                  # Agent Skill 定义
+│   └── references/               # 安装与更新、诊断与错误码
 ├── dsh-plugin/                   # DeepSeek Harness 插件（npm: bruce-doc-converter-dsh）
 │   ├── src/                      # 工具、runner、信封校验、内置技能
 │   ├── tests/                    # 单元测试 + 真实 CLI 端到端测试
@@ -280,6 +288,7 @@ bruce-doc-converter/
 
 转换核心按格式拆分到 `bruce_doc_converter/formats/`；`converter.py` 保留调度与既有 Python 入口，`output.py` 管理输出占位和原子写入。
 Markdown 使用 markdown-it 的 CommonMark 解析与表格/删除线扩展，原始 HTML 保持为文本，Mermaid 作为 fence token 渲染。
+公式经 Temml 转为 MathML 后映射为 Word OMML，脚注使用 markdown-it-footnote；这部分实现及表格列宽、嵌套布局参考自同源项目 [bruce-md2word](https://github.com/bruc3van/bruce-md2word)。
 
 ```bash
 python -m pip install -e . build

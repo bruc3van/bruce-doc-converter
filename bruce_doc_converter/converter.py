@@ -106,6 +106,8 @@ NODE_INSTALL_TIMEOUT_SECONDS = 300
 NODE_SHARED_HOME_ENV = "BRUCE_DOC_CONVERTER_NODE_HOME"
 BROWSER_PATH_ENV = "BRUCE_DOC_CONVERTER_CHROME_PATH"
 GENERATED_OUTPUT_DIR_NAMES = {"Markdown", "Word"}
+# Markdown 转 DOCX 运行时必需的 Node.js 包（Mermaid CLI 另行检查）
+NODE_RUNTIME_PACKAGES = ("docx", "jsdom", "markdown-it", "markdown-it-footnote", "temml", "jszip", "saxes")
 
 
 
@@ -398,12 +400,8 @@ def _shared_node_dependencies_ready(shared_dir, source_dir):
             return False
 
     node_modules_dir = os.path.join(shared_dir, "node_modules")
-    required_paths = [
-        os.path.join(node_modules_dir, "docx"),
-        os.path.join(node_modules_dir, "jsdom"),
-        os.path.join(node_modules_dir, "markdown-it"),
-        os.path.join(node_modules_dir, "@mermaid-js", "mermaid-cli"),
-    ]
+    required_paths = [os.path.join(node_modules_dir, package) for package in NODE_RUNTIME_PACKAGES]
+    required_paths.append(os.path.join(node_modules_dir, "@mermaid-js", "mermaid-cli"))
     if any(not os.path.exists(path) for path in required_paths):
         return False
 
@@ -594,7 +592,7 @@ def convert_md(file_path, output_dir=None, mermaid_scale=None, strict=False):
 
     use_shared = False
     local_packages_ready = all(os.path.exists(os.path.join(local_node_modules, package))
-                               for package in ('docx', 'jsdom', 'markdown-it'))
+                               for package in NODE_RUNTIME_PACKAGES)
     need_shared = not local_packages_ready or local_mmdc is None
     if need_shared and (shared_mmdc is None or not _shared_node_dependencies_ready(shared_dir, source_dir)):
         return _error_result(

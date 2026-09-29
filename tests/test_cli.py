@@ -38,6 +38,46 @@ class CliTests(unittest.TestCase):
         self.assertIn("convert", payload["commands"])
         self.assertIn("batch", payload["commands"])
         self.assertIn("setup-node", payload["commands"])
+        self.assertEqual({"source", "python", "upgrade_command", "auto_upgrade"}, set(payload["install"]))
+
+    def test_version_prints_single_line(self):
+        from bruce_doc_converter import __version__
+        result = self.run_cli("--version")
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual(__version__, result.stdout.strip())
+
+    def test_install_info_distinguishes_install_sources(self):
+        from bruce_doc_converter.cli import _install_info
+        site = "/site-packages/bruce_doc_converter/cli.py"
+
+        def info(executable, module_file, prefix="/usr", base_prefix="/usr", user_site="/home/u/.local/lib/python3/site-packages"):
+            return _install_info(executable, prefix, base_prefix, module_file, user_site)
+
+        # pipx / uv are recognized by the marker they write, wherever their home directory is.
+        with tempfile.TemporaryDirectory() as pipx_env, tempfile.TemporaryDirectory() as uv_env:
+            Path(pipx_env, "pipx_metadata.json").write_text("{}", encoding="utf-8")
+            Path(uv_env, "uv-receipt.toml").write_text("", encoding="utf-8")
+            pipx = info(os.path.join(pipx_env, "bin", "python"), pipx_env + site, prefix=pipx_env)
+            uv = info(os.path.join(uv_env, "Scripts", "python.exe"), uv_env + site, prefix=uv_env, base_prefix=r"C:\Python312")
+        self.assertEqual(("pipx", "pipx upgrade bruce-doc-converter", True), (pipx["source"], pipx["upgrade_command"], pipx["auto_upgrade"]))
+        self.assertEqual(("uv", "uv tool upgrade bruce-doc-converter", True), (uv["source"], uv["upgrade_command"], uv["auto_upgrade"]))
+
+        venv = info("/work/proj/.venv/bin/python", "/work/proj/.venv/lib/python3/site-packages/bruce_doc_converter/cli.py",
+                    prefix="/work/proj/.venv")
+        self.assertEqual("venv", venv["source"])
+        self.assertFalse(venv["auto_upgrade"], "项目 venv 由用户决定是否升级")
+        self.assertIn('"/work/proj/.venv/bin/python" -m pip install --upgrade', venv["upgrade_command"])
+
+        user = info("/usr/bin/python3", "/home/u/.local/lib/python3/site-packages/bruce_doc_converter/cli.py")
+        self.assertEqual(("user", True), (user["source"], user["auto_upgrade"]))
+        self.assertIn("--user --upgrade", user["upgrade_command"])
+
+        system = info("/usr/bin/python3", "/usr/lib/python3" + site)
+        self.assertEqual(("system", None, False), (system["source"], system["upgrade_command"], system["auto_upgrade"]))
+
+        checkout = info("/usr/bin/python3", "/work/bruce-doc-converter/bruce_doc_converter/cli.py")
+        self.assertEqual(("source", None, False), (checkout["source"], checkout["upgrade_command"], checkout["auto_upgrade"]))
 
     def test_missing_command_outputs_json_failure(self):
         result = self.run_cli()
