@@ -19,9 +19,19 @@ jobs:
           - os: ubuntu-latest
             python: '3.12'
             node: '24'
+          # The Windows runner's Node.js 22.0.0 ships without npm-cli.js, so npm ci
+          # cannot start; the 22.0.0 minimum stays covered on Linux and macOS.
+          - os: windows-latest
+            python: '3.8'
+            node: '22'
+          - os: windows-latest
+            python: '3.12'
+            node: '22'
         exclude:
           - os: macos-latest
             python: '3.8'
+          - os: windows-latest
+            node: '22.0.0'
     runs-on: ${{ matrix.os }}
     env:
       BDC_REQUIRE_NODE_TESTS: '1'
