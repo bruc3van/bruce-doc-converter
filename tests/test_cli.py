@@ -40,6 +40,19 @@ class CliTests(unittest.TestCase):
         self.assertIn("setup-node", payload["commands"])
         self.assertEqual({"source", "python", "upgrade_command", "auto_upgrade"}, set(payload["install"]))
 
+    def test_help_json_documents_all_common_options(self):
+        result = self.run_cli("--help-json")
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        payload = json.loads(result.stdout)
+        options = payload["options"]
+        for name in ("content", "preview_chars", "strict", "output_dir",
+                     "extract_images", "mermaid_scale", "recursive"):
+            self.assertIn(name, options)
+        self.assertIn("setup_node", options)
+        self.assertIn("allow_scripts", options["setup_node"])
+        self.assertIn("install_browser", options["setup_node"])
+
     def test_version_prints_single_line(self):
         from bruce_doc_converter import __version__
         result = self.run_cli("--version")
